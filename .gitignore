@@ -2,3 +2,6 @@
 /.vscode
 /*/__pycache__
 /config/embedding.npy
+/logs
+align_ners.py
+log_test.py
