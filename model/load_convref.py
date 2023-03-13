@@ -11,6 +11,8 @@ from transformers import BertTokenizer
 from pathlib import Path
 from torch.utils.data import DataLoader, Dataset
 
+from tools.tokenization import BasicTokenizer
+
 import pdb
 
 logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s', datefmt = '%m/%d/%Y %H:%M:%S', level = logging.INFO)
@@ -61,8 +63,37 @@ def gold_dataset(set_type: str):
         with open(f"{ROOT_PATH}/ConvRef/data/ConvRef_gold_{set_type}.json", "w", encoding="utf-8") as f:
             json.dump(new_convs, f)
 
+class ConvRefInstance:
+    def __init__(self, conv) -> None:
+        self.seed_entity = conv["seed_entity"]
+        self.seed_entity_text = conv["seed_entity_text"]
+        self.conv_id = conv["question_id"]
+        self.domain = conv["domain"]
+        self.questions = conv["questions"]
+        self.current_paths = []
+        self.orig_candidate_paths = []
+        self.current_F1s = []
+        self.orig_F1s = []
+        self.F1s = []
+        self.historical_frontier = []
+        self.current_frontier = []
+    
+    def __str__(self):
+        instance_format = "q:{} a: {} a_e: {} r_num: {}\n"
+        s = ""
+        for qa in self.questions:
+            s += instance_format.format(qa["question"], qa["gold_answer_text"], qa["gold_answer"], len(qa["reformulations"]))
+        return s
+
+    def __repr__(self) -> str:
+        return self.__str__()
+    
+    def reset(self):
+        self.historical_frontier = []
+        self.current_frontier = []
+
 # Dataset for the processed data
-class ConvRefDataset(Dataset):
+class ConvRefDataset:
     def __init__(self, vocab_file: str, set_type: str="", set_path: str = "") -> None:
         if set_type is None or set_type not in ['trainset', 'devset', 'testset', "debug"]:
             raise Exception(f"Unknown set type {set_type}")
@@ -73,31 +104,37 @@ class ConvRefDataset(Dataset):
 
         logger.info(f"Loading dataset {set_type} from {set_path}")
         with open(set_path, "r", encoding="utf-8") as f:
-            self.converstaions = json.load(f)
+            self.conversations = json.load(f)
 
-        # tokenizer
-        # self.tokenizer = BasicTokenizer(vocab_file=vocab_file)
+        self.tokenizer = BasicTokenizer(vocab_file=vocab_file)
 
-        # Encode the questions and answers
+        # Reformulate the conversation and encode the questions and answers
         self.unique_convs = []
         for conv in self.conversations:
             unique_conv = conv
-            unique_conv["seed_entity"] = re.search("Q\d+", conv["seed_entity"])
+            unique_conv["seed_entity"] = re.search("Q\d+", conv["seed_entity"]).group()
             unique_qas = []
             for qa in conv["questions"]:
                 unique_qa = qa
-                qs_id = torch.nn.utils.rnn.pad_sequence(list(map(
-                    lambda q: torch.tensor(self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(q)), dtype=torch.LongTensor), 
-                    qa["question"] + qa["reformulations"]
-                )), batch_first=True)
-                ans_path = [" ".join(p, qa["gold_answer_text"]) for p in qa["gold_paths"]]
-                ans_id = torch.nn.utils.rnn.pad_sequence(list(map(
-                    lambda a: torch.tensor(self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(a)), dtype=torch.LongTensor), 
-                    ans_path
-                )), batch_first=True)
-                unique_qa["qs_id"] = qs_id
-                unique_qa["ans_id"] = ans_id
-                unique_qa["gold_answer_entity"] = re.search("^Q\d+", qa["gold_answer_entity"]).group()
+
+                qs_ = [qa["question"]] + qa["reformulations"]
+                qs_token = map(lambda q: self.tokenizer.tokenize(q), qs_)
+                qs_id = list(map(lambda q: torch.tensor(self.tokenizer.convert_tokens_to_ids(q), dtype=torch.long), qs_token))
+                qs_tensor = torch.nn.utils.rnn.pad_sequence(qs_id, batch_first=True)
+
+                if len(qa["gold_paths"]) != 0:
+                    ans_path = [" ".join(p + [qa["gold_answer_text"]]) for p in qa["gold_paths"]]
+                else:
+                    ans_path = [qa["gold_answer_text"]]
+                ans_token = map(lambda a: self.tokenizer.tokenize(a), ans_path)
+                ans_id = list(map(lambda a: torch.tensor(self.tokenizer.convert_tokens_to_ids(a), dtype=torch.long), ans_token))
+                ans_tensor = []
+                ans_tensor = torch.nn.utils.rnn.pad_sequence(ans_id, batch_first=True)
+
+                unique_qa["qs_id"] = qs_tensor
+                unique_qa["ans_id"] = ans_tensor
+                unique_qa["gold_answer"] = re.search("Q\d+", qa["gold_answer"]).group() if re.search("Q\d+", qa["gold_answer"]) else qa["gold_answer"]
+                unique_qa["relation"] = ""
                 unique_qas.append(unique_qa)
             unique_conv["questions"] = unique_qas
             self.unique_convs.append(unique_conv)

@@ -1,9 +1,11 @@
+import os
 import torch
 import torch.nn as nn
 import pytorch_lightning as L
 import torch.nn.functional as F
-
 import numpy as np
+
+from transformers import BartTokenizer, BertForMultipleChoice, BartForConditionalGeneration, BertTokenizer
 from typing import List, Tuple
 from torch.nn import KLDivLoss, MSELoss
 from model.advanced_layer import SimpleEmbLayer, SimplePooler
@@ -22,14 +24,50 @@ class LSTMRef(nn.Module):
         self.pooler = SimplePooler(config)
         self.heads = 5
         self.emb = self.hidden_size // self.heads
+
+        # Conversation progress, consider to use this ?
         self.initial_hidden = (torch.randn(1, self.hidden_size).to(self.device), torch.randn(1, self.hidden_size).to(self.device))
+
+        # Encode question and candidate answer paths
         self.q_encoder = nn.LSTM(input_size=self.hidden_size, hidden_size=int(self.hidden_size / 2), bidirectional=True, batch_first=True)
         self.cp_encoder = nn.LSTM(input_size=self.hidden_size, hidden_size=int(self.hidden_size / 2), bidirectional=True, batch_first=True)
-        # self.weight_linear = nn.Linear(2 * self.hidden_size)
+
+        # Regard the selecting topic entity problem as multiple choice question
+        self.choice_template = "Which answer is the subject of the question '{}'"
+        self.choice_tokenizer: BertTokenizer = BertTokenizer.from_pretrained("bert-base-uncased") if not os.path.exists(config.Choice) else BertTokenizer.from_pretrained(config.Choice)
+        self.choice_model: BertForMultipleChoice = BertForMultipleChoice.from_pretrained("bert-base-uncased") if not os.path.exists(config.Choice) else BertForMultipleChoice.from_pretrained(config.Choice)
+
+        # Rewrite the question into complete one
+        self.rewrite_tokenizer: BartTokenizer = BartTokenizer.from_pretrained("eugenesiow/bart-paraphrase") if not os.path.exists(config.PLM) else BartModel.from_pretrained(config.PLM)
+        self.rewrite_model: BartForConditionalGeneration = BartForConditionalGeneration.from_pretrained("eugenesiow/bart-paraphrase") if not os.path.exists(config.PLM) else BartForConditionalGeneration.from_pretrained(config.PLM)
 
 
-    def init_hidden(self):
+    def init_hidden(self) -> List[torch.Tensor, torch.Tensor]:
         self.hidden = [self.initial_hidden]
+
+
+    def choose_topic_entity(self, topic_entities: List[str], question: str) -> List[str, int]:
+        topic_choices = list(map(lambda x: self.choice_template.format(x), topic_entities))
+        topic_choices = self.choice_tokenizer([self.choice_template] * len(topic_choices), topic_choices, return_tensors='pt', padding=True)
+
+        labels = torch.tensor(0).unsqueeze(0)
+        outputs = self.choice_model(
+            **{k: v.unsqueeze(0) for k, v in topic_choices.items()}, labels=labels
+        )
+        logits, loss = outputs.loss, outputs.logits
+        topic_idx = torch.argmax(logits).detach().cpu().item()
+        return topic_entities[topic_idx], topic_idx
+
+
+    def rewrite(self, topic_entity: str, question: str) -> str:
+        input_seq = topic_entity + ", " + question
+        
+        # Rephrase the question without explicity mentioned topic entity
+        seq_ = self.rewrite_tokenizer(input_seq, return_tensors='pt')
+        generate_ids = self.rewrite_model.generate(seq_['input_ids'])
+        generate_sentences = self.rewrite_tokenizer.batch_decode(generate_ids, skip_special_tokens=True)
+
+        return generate_sentences
 
 
     def tokenize_sentence(self, sentences: List[str]) -> torch.Tensor:

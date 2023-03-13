@@ -2,6 +2,7 @@
 /.vscode
 /*/__pycache__
 /config/embedding.npy
+/config/PLM/*
 /logs
 align_ners.py
 log_test.py

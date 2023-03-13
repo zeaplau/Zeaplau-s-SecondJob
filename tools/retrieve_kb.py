@@ -1,8 +1,12 @@
 import re
 import copy
 import numpy as np
-from SPARQL_service import sparql_test
+
 from datetime import datetime
+from rank_bm25 import BM25Okapi
+
+from tools.SPARQL_service import sparql_test
+from tools.tokenization import BasicTokenizer
 
 const_minimax_dic = 'amount|number|how many|final|first|last|predominant|biggest|major|warmest|tallest|current|largest|most|newly|son|daughter'
 const_interaction_dic = '(and|or)'
@@ -158,18 +162,35 @@ def retrieve_via_frontier(frontier, topic_entity, raw_candidate_paths, kb_retrie
     return raw_candidate_paths
 
 
-def retrieve_ConvRef_KB(instance, kb_retriever, tokenizer, time, is_train, not_update):
+def retrieve_ConvRef_KB(instance, kb_retriever: sparql_test, tokenizer: BasicTokenizer, time, is_train, not_update):
     raw_candidate_paths, paths, instance.orig_F1s, topic_entities = [], {}, [], []
 
     # Retrieve the candidate answer paths
     if time == 0:
-        topic_entity = instance['seed_entity']
-        raw_candidate_paths = retrieve_via_frontier(frontier=topic_entity, topic_entity=topic_entity, raw_candidate_paths=raw_candidate_paths, kb_retriever=kb_retriever, question=instance['question'][time])
+        topic_entity = instance.seed_entity
+        raw_candidate_paths = retrieve_via_frontier(frontier=topic_entity, topic_entity=topic_entity, raw_candidate_paths=raw_candidate_paths, kb_retriever=kb_retriever, question=instance.questions[time]['question'])
         instance.current_frontier = topic_entity
     else:
-        topic_entity = instance['question'][time]['NER']
-        if len(instance['question'][time]['gold_paths']) > 0:
-            gold_p = instance['question'][time]['gold_paths']
+        topic_entity: str = instance.questions[time]['NER'] # topic entity in ner result
+
+        key = (instance.seed_entity, None)
+        key = ' '.join([' '.join(list(r)) if isinstance(r, tuple) else str(r) for r in key])
+        query_statements = kb_retriever.STATEMENTS.get(key, [])
+        entities_in_hops = []
+        for s in list(query_statements.values()):
+            entities_in_hops += list(s)
+        entities_in_hops = list(map(lambda e: kb_retriever.wikidata_id_to_label(e), filter(lambda e: re.search("Q\d+", e), entities_in_hops)))
+        if topic_entity != [] and len(entities_in_hops) != 0:
+            corpus = list(
+                map(lambda e: tokenizer.tokenize(e.lower()), entities_in_hops)
+            )
+            bm25 = BM25Okapi(corpus=corpus)
+            query = tokenizer.tokenize(topic_entity.lower())
+            entities_scores = np.array(bm25.get_scores(query=query))
+            topic_entity = entities_in_hops(np.argmax(entities_scores).item())
+
+        if len(instance.questions[time]['gold_paths']) > 0:
+            gold_p = instance.questions[time]['gold_paths']
             ans_frontier = list(set((filter(lambda x: re.search("^Q", x), map(lambda t: kb_retriever.wikidata_label_to_id(t), gold_p)))))
         else:
             prev_hit1p = sum([list(instance.path2ans[t])[:1] for t in instance.path2ans], [])
@@ -179,14 +200,14 @@ def retrieve_ConvRef_KB(instance, kb_retriever, tokenizer, time, is_train, not_u
             topic_entity = list(filter(lambda x: x not in ['UNK'], map(lambda x: x if re.search("^Q", ) else kb_retriever.wikidata_label_to_id(x), sorted_frontiers)))
             instance.current_topics = topic_entity
 
-            addin_historical_frontier(instance, kb_retriever, instance['seed_entity'], prev_frontiers, ans_frontiers)
+            addin_historical_frontier(instance, kb_retriever, instance.seed_entity, prev_frontiers, ans_frontiers)
 
-            if re.search("^%s" % const_verification_dic, instance['questions'][time]['question']) and len(set(topic_entity)) > 0:
+            if re.search("^%s" % const_verification_dic, instance.questions[time]['question']) and len(set(topic_entity)) > 0:
                 frontier = set(topic_entity)
             else:
                 frontier = set(topic_entity + instance.hitorical_frontier)
             
-            raw_candidate_paths = retrieve_via_frontier(frontier, topic_entity, raw_candidate_paths, kb_retriever, instance['questions'][time]['question'], not_update=not_update)
+            raw_candidate_paths = retrieve_via_frontier(frontier, topic_entity, raw_candidate_paths, kb_retriever, instance.questions[time]['question'], not_update=not_update)
     # TODO Score the candidata answer paths
 
     candidate_paths, hop_numbers = [], []
@@ -205,16 +226,16 @@ def retrieve_ConvRef_KB(instance, kb_retriever, tokenizer, time, is_train, not_u
     instance.path2ans = path2ans
     sorted_path = sorted(instance.path2ans.keys())
     ...
-    gold_ans, do_month = clean_answer(instance['questions'][time]['gold_answer'])
-    if re.search("^%s" % const_verification_dic, instance['questions'][time]['question']):
-        gold_ans = [w for w in instance['questions'][time]['relation']] if instance['questions'][time]['relation'] != "" else instance.current_topics
-        psesudo_ans = [w.lower() for w in instance['questions'][time]['gold_answer_text']]
+    gold_ans, do_month = clean_answer(instance.questions[time]['gold_answer'])
+    if re.search("^%s" % const_verification_dic, instance.questions[time]['question']):
+        gold_ans = [w for w in instance.questions[time]['relation']] if instance.questions[time]['relation'] != "" else instance.current_topics
+        psesudo_ans = [w.lower() for w in instance.questions[time]['gold_answer_text']]
     
     for p_idx, p in enumerate(sorted_path):
         pred_ans, _ = clean_answer(path2ans[p][0], do_month=do_month)
-        if re.search("^%s" % const_verification_dic, instance['questions'][time]['question']) and is_train:
+        if re.search("^%s" % const_verification_dic, instance.questions[time]['question']) and is_train:
             measure_F1 = generate_Inclusion(gold_ans, set(p))
-        elif re.search("^%s" % const_verification_dic, instance['questions'][time]['question']):
+        elif re.search("^%s" % const_verification_dic, instance.questions[time]['question']):
             measure_F1 = ['yes'] if generate_Inclusion(gold_ans, set(p)) == 1 else ['no']
             if len(set(topic_entity) == 0):
                 measure_F1 = ['yes']
@@ -254,7 +275,7 @@ def retrieve_ConvRef_KB(instance, kb_retriever, tokenizer, time, is_train, not_u
         instance.F1s = np.array(instance.F1s)
         instance.current_F1s = np.array(instance.current_F1s)
         const_ans = None
-        if re.search("^%s" % const_verification_dic, instance['questions'][time]['question']):
+        if re.search("^%s" % const_verification_dic, instance.questions[time]['question']):
             if np.sum(instance.F1s) >= 1.:
                 const_ans = gold_ans
         if np.sum(instance.F1s) == 0:

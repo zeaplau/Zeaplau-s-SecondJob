@@ -16,10 +16,12 @@ from torch.optim import AdamW
 from tools.SPARQL_service import sparql_test
 from model.optimizer import Lion
 from model.lstm_ref import LSTMRef
-from model.load_convref import ConvRefDataset
+from model.load_convref import ConvRefDataset, ConvRefInstance
 from tools.tokenization import BasicTokenizer
 from tools.create_config import ModelConfig
 from tools.retrieve_kb import retrieve_ConvRef_KB, const_interaction_dic
+
+import pdb
 
 ROOT_PATH = Path(os.getcwd())
 
@@ -29,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 # create kb_retriever
 kb_retriever = sparql_test()
+
 
 def generate_record(ins_idx: int, time: int, instance, score: torch.Tensor, gold_score: torch.Tensor, real_ans: str, topk: int=10, is_const: int=0) -> List[str]:
     if isinstance(score, torch.Tensor):
@@ -81,16 +84,18 @@ def get_loss_and_ans(model: LSTMRef, instance, cps_ids: torch.Tensor , time: int
     return rank_logits, hit1_entity, loss
 
 
-def process(is_train, args, model: LSTMRef, optimizer: torch.optim.Optimizer, dataloader: DataLoader, kb_retriever) -> Tuple[int, float, float, list]:
+def process(is_train, args, model: LSTMRef, optimizer: torch.optim.Optimizer, dataset, kb_retriever) -> Tuple[int, float, float, list]:
     """Process of train / valid / test
     """
+    pdb.set_trace() # <- 
+
     process_log_format = "avg_loss: {} hits:{} avg_reward: {} reward_boundry: {}"
 
     # retrieve kb and get path
     total_loss, rewards, rewards_expect, path_logs = [], [], [], []
     hit1 = 0
     model.train() if is_train else model.eval()
-    for step, instance in enumerate(dataloader):
+    for step, instance in enumerate(dataset):
         time = 0
         while time < len(instance['questions']):
             update_instance(instance=instance)
@@ -126,7 +131,7 @@ def process(is_train, args, model: LSTMRef, optimizer: torch.optim.Optimizer, da
                         path_logs += p_logs
 
     avg_reward, avg_reward_boundry = np.mean(rewards), np.mean(rewards_expect)
-    avg_loss = sum(total_loss) / (len(dataloader) * 5)
+    avg_loss = sum(total_loss) / (len(dataset) * 5)
     logger.info(process_log_format.format(avg_loss, avg_reward, avg_reward_boundry))
     return hit1, avg_loss, avg_reward, path_logs
 
@@ -137,7 +142,6 @@ if __name__ == "__main__":
     parser.add_argument("--train_folder", default=f"{ROOT_PATH}/ConvRef/data/ConvRef_gold_trainset.json", type=str, help="The path of trainset.")
     parser.add_argument("--dev_folder", default=f"{ROOT_PATH}/ConvRef/data/ConvRef_gold_devset.json", type=str, help="The path of devset.")
     parser.add_argument("--test_folder", default=f"{ROOT_PATH}/ConvRef/data/ConvRef_gold_testset.json", type=str, help="The path of testset.")
-    parser.add_argument("--cache_dir", default=f"{ROOT_PATH}/ConvRef/", type=str, help="The cache for KB.")
 
     # Train setting
     parser.add_argument("--do_train", default=1, type=int, help="Train the model")
@@ -147,12 +151,13 @@ if __name__ == "__main__":
     parser.add_argument("--learning_rate", default=1e-4, type=float, help="Learning rate for optimizer.")
     parser.add_argument("--vocab_txt", default=f"{ROOT_PATH}/config/vocab.txt", help="The vocabulary file for tokenizer.")
     parser.add_argument("--config", default=f"{ROOT_PATH}/config/config_SimpleRanker.json", type=str, help="The path of config file.")
-    parser.add_argument("--alpha", default=0.5, type=int, help="The alpha value for loss calculate.")
+    parser.add_argument("--alpha", default=0.5, type=float, help="The alpha value for loss calculate.")
     parser.add_argument("--batch_size", default=1, type=int, help="The batch size for model.")
     parser.add_argument("--seed", default=123, type=int, help="The seed for random generation.")
     parser.add_argument("--gpu_id", default=0, type=int, help="The gpu to use.")
     parser.add_argument("--optimizer", default="AdamW", type=str, help="Optimizer for the model.")
     parser.add_argument("--checkpoint", default=datetime.now().strftime("%Y-%m-%d %H %M %S").replace(" ", "_"), type=str, help="Checkpoint name of save / load model.")
+    parser.add_argument("--cache_dir", default=f"{ROOT_PATH}/ConvRef/cache/", type=str, help="The dir of cache.")
 
     # Model path
     parser.add_argument("--model_path", default=None, type=str, help="The path of the model.")
@@ -167,14 +172,24 @@ if __name__ == "__main__":
     logger.addHandler(f_handler)
     logger.info(f"Log file at {ROOT_PATH}/logs/{args.checkpoint}.log")
 
-    # Chech cuda
+    cache_dir = args.cache_dir
+    kb_retriever.load_cache(
+        "%s/M2N.json" % cache_dir, 
+        "%s/STATEMENTS.json" % cache_dir, 
+        "%s/QUERY.json" % cache_dir, 
+        "%s/TYPE.json" % cache_dir, 
+        "%s/OUTDEGREE.json" % cache_dir,
+    )
+    logger.info(f"Load cache from {cache_dir}")
+
+    # Check cuda
     if torch.cuda.is_available():
         device = torch.device("cuda", args.gpu_id)
-        logger.info(f"Cuda is available: {device}")
+        logger.info(f"Cuda is available, using: {device}")
         args.gpu_id = 1
     else:
         device = "cpu"
-        logger.info(f"Cuda is inavailable: {device}")
+        logger.info(f"Cuda is inavailable, using: {device}")
 
     # Set seed
     random.seed(args.seed)
@@ -189,22 +204,27 @@ if __name__ == "__main__":
 
     # Load dataset
     if args.do_train:
-        train_set = ConvRefDataset(args.vocab_txt, "trainset")
+        train_set = ConvRefDataset(args.vocab_txt, "trainset", args.train_folder).unique_convs
         logger.info(f"----- Instances num: {len(train_set)} -----")
-        train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True)
+        train_set = [ConvRefInstance(conv) for conv in train_set]
+        pdb.set_trace() # <-
+        random.shuffle(train_set)
+        # train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=4)
     if args.do_eval:
-        dev_set = ConvRefDataset(args.vocab_txt, "devset")
+        dev_set = ConvRefDataset(args.vocab_txt, "devset", args.dev_folder).unique_convs
         logger.info(f"----- Instances num: {len(dev_set)} -----")
-        dev_loader = DataLoader(dev_set, batch_size=args.batch_size, shuffle=True)
+        dev_set = [ConvRefInstance(conv) for conv in dev_set]
+        # dev_loader = DataLoader(dev_set, batch_size=args.batch_size, shuffle=False, num_workers=4)
     if args.do_test:
-        test_set = ConvRefDataset(args.vocab_txt, "testset")
+        test_set = ConvRefDataset(args.vocab_txt, "testset", args.test_folder).unique_convs
         logger.info(f"----- Instances num: {len(test_set)} -----")
-        test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False)
+        test_set = [ConvRefInstance(conv) for conv in test_set]
+        # test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=4)
 
     tokenizer = BasicTokenizer(args.vocab_txt)
     config = ModelConfig.from_json_file(args.config)
     model = LSTMRef(config=config, tokenizer=tokenizer, device=device)
-    optimizer = AdamW(params=list(model.parameters()), lr=args.learning_rate) if args.optimzier == "AdamW" else Lion(param=list(model.parameters()), lr=args.learning_rate)
+    optimizer = AdamW(params=list(model.parameters()), lr=args.learning_rate) if args.optimizer == "AdamW" else Lion(param=list(model.parameters()), lr=args.learning_rate)
     
     if os.path.exists(args.checkpoint):
         try:
@@ -212,18 +232,18 @@ if __name__ == "__main__":
             model.load_state_dict(model_dict, strict=False)
         except:
             assert f"{args.checkpoint} is not compatible for current model."
+
     ...
-    # TODO process of train / valid / test
-    init_hit, init_reward, init_loss = 0, 9999
-    for epoch in args.epoch_nums:
+    init_hit, init_reward, init_loss = 0, 99999., 99999.
+    for epoch in range(args.epoch_nums):
         if args.do_train:
             logger.info(f"Traninig epoch: {epoch}")
-            hit, loss, reward, path_logs = process(is_train=1, args=args, model=model, optimizer=optimizer, dataloader=train_loader, kb_retriever=kb_retriever)
+            hit, loss, reward, path_logs = process(is_train=1, args=args, model=model, optimizer=optimizer,dataset=train_set, kb_retriever=kb_retriever)
             logger.info(f"Train epoch {epoch} hit {hit} avg_loss {loss} avg_reward {reward}")
 
         if args.do_eval:
             logger.info(f"Evaluating epoch: {epoch}")
-            hit, loss, reward, path_logs = process(is_train=0, args=args, model=model, optimizer=optimizer, dataloader=dev_loader, kb_retriever=kb_retriever)
+            hit, loss, reward, path_logs = process(is_train=0, args=args, model=model, optimizer=optimizer, dataset=dev_set, kb_retriever=kb_retriever)
             logger.info(f"Valid epoch {epoch} hit {hit} avg_loss {loss} avg_reward {reward}")
             if reward > init_reward:
                 init_reward = reward
@@ -236,7 +256,7 @@ if __name__ == "__main__":
 
         if args.do_test:
             logger.info(f"Testing {ROOT_PATH}/ckpt/{args.checkpoint}.pth")
-            hit, loss, reward, path_logs = process(is_train=0, args=args, model=model, optimizer=optimizer, dataloader=test_loader, kb_retriever=kb_retriever)
+            hit, loss, reward, path_logs = process(is_train=0, args=args, model=model, optimizer=optimizer, dataset=test_set, kb_retriever=kb_retriever)
             with open(f"{ROOT_PATH}/ckpt/test/{args.checkpoint}.log", "w", encoding="utf-8") as f:
                 f.write("\n".join(path_logs))
             logger.info(f"Test result save at {ROOT_PATH}/ckpt/{args.checkpoint}.logs")

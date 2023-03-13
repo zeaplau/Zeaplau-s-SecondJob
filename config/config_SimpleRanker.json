@@ -15,5 +15,7 @@
 "use_bert": 0,
 "use_te_graph": 0,
 "use_match": 0,
-"type_vocab_size": 3
+"type_vocab_size": 3,
+"rewrite": "config/rewrite/",
+"choice": "config/choice"
 }
