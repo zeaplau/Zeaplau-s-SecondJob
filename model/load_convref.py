@@ -67,18 +67,22 @@ class ConvRefInstance:
     def __init__(self, conv) -> None:
         self.seed_entity = conv["seed_entity"]
         self.seed_entity_text = conv["seed_entity_text"]
-        self.conv_id = conv["question_id"]
+        self.conv_id = conv["conv_id"]
         self.domain = conv["domain"]
         self.questions = conv["questions"]
         self.current_paths = []
         self.orig_candidate_paths = []
+        self.candidate_paths = []
         self.current_F1s = []
         self.orig_F1s = []
         self.F1s = []
         self.historical_frontier = []
         self.current_frontier = []
+        self.path2ans = {}
+        self.statements = []
     
     def __str__(self):
+        # question, gold_answer_text, gold_answer, reformulation number
         instance_format = "q:{} a: {} a_e: {} r_num: {}\n"
         s = ""
         for qa in self.questions:

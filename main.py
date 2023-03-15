@@ -6,6 +6,7 @@ import logging
 import random
 import numpy as np
 import torch.nn as nn
+import torch.nn.functional as F
 
 from datetime import datetime
 from typing import Tuple, List
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 kb_retriever = sparql_test()
 
 
-def generate_record(ins_idx: int, time: int, instance, score: torch.Tensor, gold_score: torch.Tensor, real_ans: str, topk: int=10, is_const: int=0) -> List[str]:
+def generate_record(ins_idx: int, time: int, instance, score: torch.Tensor, gold_score: torch.Tensor, real_ans: str, topk: int=10, const_ans=None) -> List[str]:
     if isinstance(score, torch.Tensor):
         score = score.detach().cpu().numpy()
     if isinstance(gold_score, torch.Tensor):
@@ -43,37 +44,38 @@ def generate_record(ins_idx: int, time: int, instance, score: torch.Tensor, gold
     path_format = "{} {} {} {} {} {}"
     logs = []
     
-    if not is_const:
-        topk_idx = np.argmax(score, dim=2)[::-1][:topk]
+    if const_ans is None:
+        topk_idx = list(map(lambda x: x[::-1][:topk], np.argsort(score, axis=1)))
         is_recalled = np.array(gold_score != 0.).any()
         # get predict path
-        orig_paths = [instance.orig_candidate_paths[p_idx] for p_idx in topk_idx]
-        answer_entities = [instance.path2ans[sum(p, ())] for p in orig_paths]
+        orig_paths = [instance.orig_candidate_paths[p_idx] for p_idx in topk_idx[0]] # we only use orignal question
+        answer_entities = [list(instance.path2ans[p][0])[0] for p in orig_paths]
         for e in answer_entities:
-            logs += [path_format.format(ins_idx, time, e, real_ans, is_recalled, is_const)]
+            logs += [path_format.format(ins_idx, time, e, real_ans, is_recalled, 0)]
     else:
         # we do not consider the recall here, since if we regard that if the system can not recall the message, 
         # give the answer as 'no' defaultly
-        is_recalled = 'yes' if (gold_score != 0.).any() else 'no'
-        e = 'yes' if (score != 0.).any() else 'no'
+        is_recalled = 1. if (gold_score != 0.).any() else 0.
         for _ in range(topk):
-            logs += [path_format.format(ins_idx, time, e, real_ans, is_recalled, is_const)]
+            logs += [path_format.format(ins_idx, time, const_ans, real_ans, is_recalled, 1)]
     return logs
 
 
-def update_instance(instance):
+def update_instance(instance, const_ans):
     instance.current_paths = []
     instance.orig_candidate_paths = []
     instance.current_F1s = []
     instance.orig_F1s = []
     instance.F1s = []
+    if const_ans is not None:
+        instance.path2ans = []
 
 
 def rank_cps(instance, dot_sim: torch.Tensor) -> Tuple[torch.Tensor, str]:
-    score = torch.softmax(dot_sim, dim=2, dtype=torch.float)
-    hit1_idx = torch.argmax(dot_sim, dim=2).item()
-    path = instance.orig_candidate_paths[hit1_idx]
-    hit1_entity = instance.path2ans[sum(path, ())]
+    score = F.softmax(dot_sim, dim=1)
+    hit1_idx = torch.argmax(dot_sim, dim=1).detach().cpu().numpy()
+    path = [instance.orig_candidate_paths[i] for i in hit1_idx]
+    hit1_entity = [list(instance.path2ans[p][0])[0] for p in path]
     return score, hit1_entity
 
 
@@ -87,7 +89,6 @@ def get_loss_and_ans(model: LSTMRef, instance, cps_ids: torch.Tensor , time: int
 def process(is_train, args, model: LSTMRef, optimizer: torch.optim.Optimizer, dataset, kb_retriever) -> Tuple[int, float, float, list]:
     """Process of train / valid / test
     """
-    pdb.set_trace() # <- 
 
     process_log_format = "avg_loss: {} hits:{} avg_reward: {} reward_boundry: {}"
 
@@ -95,40 +96,58 @@ def process(is_train, args, model: LSTMRef, optimizer: torch.optim.Optimizer, da
     total_loss, rewards, rewards_expect, path_logs = [], [], [], []
     hit1 = 0
     model.train() if is_train else model.eval()
+    pdb.set_trace() # <-
     for step, instance in enumerate(dataset):
         time = 0
-        while time < len(instance['questions']):
-            update_instance(instance=instance)
-            is_const = 0
+        while time < len(instance.questions):
+            if time == 1:
+                pdb.set_trace()
+
+            const_ans = None
+            update_instance(instance=instance, const_ans=const_ans)
             cps, const_ans = retrieve_ConvRef_KB(instance=instance, kb_retriever=kb_retriever, tokenizer=tokenizer, time=time, is_train=is_train, not_update=True)
-            if re.search("^%s" % const_interaction_dic, instance['question'][time]['question']):
+            if re.search("^%s" % const_interaction_dic, instance.questions[time]['question'].lower()):
                 # TODO: calculate the const question directly use 'yes' or 'no'
-                is_const = 1
+                ...
             else:
-                cps_ids = model.tokenize_sentence(cps)
+                cps_join = [" ".join(cp) for cp in cps]
+                cps_ids = model.tokenize_sentence(cps_join)
                 if is_train:
                     with torch.autograd.set_detect_anomaly(True):
+                        reward, reward_expect = 0., 0.
                         rank_logits, hit1_entity, _loss = get_loss_and_ans(model, instance, cps_ids, time, args.alpha)
-                        optimizer.zero_grad()
-                        _loss.backward()
-                        optimizer.step()
-                        total_loss += [_loss.item()]
-                        reward, reward_expect = torch.argmax(torch.softmax(rank_logits, dim=2)).detach().cpu().numpy().item(), np.max(instance.F1s).item()
-                        rewards += [reward]
-                        rewards_expect += [reward_expect]
-                        
-                        p_logs = generate_record(ins_idx=step, time=time, instance=instance, score=rank_logits, gold_score=instance.F1s, real_ans=instance['questions'][time]['gold_answer_entity'], topk=10, is_const=is_const)
-                        path_logs += p_logs
-                else:
-                    with torch.no_grad():
-                        rank_logits, hit1_entity, _loss = get_loss_and_ans(model, instance, cps_ids, time, args.alpha)
-                        total_loss += [_loss.item()]
-                        reward, reward_expect = torch.argmax(torch.softmax(rank_logits, dim=2)).detach().cpu().numpy().item(), np.max(instance.F1s).item()
+
+                        # if the question is const_verification question, we simply use the retrieve result to judge
+                        # the question answer
+                        if const_ans is None:
+                            optimizer.zero_grad()
+                            _loss.backward()
+                            optimizer.step()
+                            total_loss += [_loss.item()]
+                            reward, reward_expect = torch.argmax(torch.softmax(rank_logits, dim=1)).detach().cpu().numpy().item(), np.max(instance.F1s).item()
+                        else:
+                            reward, reward_expect = 1. if instance.questions[time]['gold_answer'].lower() in const_ans else 0., 0.5
+
                         rewards += [reward]
                         rewards_expect += [reward_expect]
 
-                        p_logs = generate_record(ins_idx=step, time=time, instance=instance, score=rank_logits, gold_score=instance.F1s, real_ans=instance['questions'][time]['gold_answer_entity'], topk=10, is_const=is_const)
+                        p_logs = generate_record(ins_idx=step, time=time, instance=instance, score=rank_logits, gold_score=instance.F1s, real_ans=instance.questions[time]['gold_answer'], topk=10, const_ans=const_ans)
                         path_logs += p_logs
+                else:
+                    with torch.no_grad():
+                        if const_ans is None:
+                            rank_logits, hit1_entity, _loss = get_loss_and_ans(model, instance, cps_ids, time, args.alpha)
+                            total_loss += [_loss.item()]
+                            reward, reward_expect = torch.argmax(torch.softmax(rank_logits, dim=2)).detach().cpu().numpy().item(), np.max(instance.F1s).item()
+                        else:
+                            reward, reward_expect = 1. if instance.questions[time]['gold_answer'].lower() in const_ans else 0., 0.5
+
+                        rewards += [reward]
+                        rewards_expect += [reward_expect]
+
+                        p_logs = generate_record(ins_idx=step, time=time, instance=instance, score=rank_logits, gold_score=instance.F1s, real_ans=instance.questions[time]['gold_answer_entity'], topk=10, const_ans=const_ans)
+                        path_logs += p_logs
+            time += 1
 
     avg_reward, avg_reward_boundry = np.mean(rewards), np.mean(rewards_expect)
     avg_loss = sum(total_loss) / (len(dataset) * 5)
@@ -207,7 +226,6 @@ if __name__ == "__main__":
         train_set = ConvRefDataset(args.vocab_txt, "trainset", args.train_folder).unique_convs
         logger.info(f"----- Instances num: {len(train_set)} -----")
         train_set = [ConvRefInstance(conv) for conv in train_set]
-        pdb.set_trace() # <-
         random.shuffle(train_set)
         # train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=4)
     if args.do_eval:
