@@ -1,10 +1,14 @@
 import torch
-from model.lstm_ref import LSTMRef
+
+from model.load_convref import ConvRefDataset, ConvRefInstance
+from model.lstm_ref import RefModel
 from tools.tokenization import BasicTokenizer
 from tools.create_config import ModelConfig
 
 import random
 import numpy as np
+
+import pdb
 
 random.seed(123)
 np.random.seed(123)
@@ -16,28 +20,22 @@ tokenizer = BasicTokenizer("./config/vocab.txt")
 
 device = "cpu"
 
-model = LSTMRef(config=config, tokenizer=tokenizer, device=device)
+model = RefModel(config=config, tokenizer=tokenizer, device=device)
 
-questions = [
-    "When did The Carpenters sign with A&M Records?",
-    "At which date did The Carpenters sign with A&M Records?",
-    "Date when A&M Records sign The Carpenters?",
-    "When did A&M Records sign with The Carpenters?",
-    "Day when The Carpenters sign with the A&M Records?"
-]
+train_set = ConvRefDataset("./config/vocab.txt", "trainset", "./ConvRef/data/ConvRef_gold_trainset.json").unique_convs
+train_set = [ConvRefInstance(conv) for conv in train_set]
 
-cps = [
-    ["The Carpenters", "work period (start)"], ["The Carpenters", "inception"], ['facet of', 'The Simpsons'], ['followed by', 'The Simpsons'], 
-    ['performer', 'The Simpsons'], ['series spin-off', 'The Simpsons']
-]
+questions = ["When did Karen die?", "Karen's day of death?", "Karen's year of death?", "What day did Karen die?", "What month did Karen die?"]
 
-ga_cps = [["The Carpenters", "work period (start)"], ["The Carpenters", "inception"]]
+questions_ids = list(
+    map(lambda x: torch.tensor(tokenizer.convert_tokens_to_ids(tokenizer.tokenize(x)), dtype=torch.long), questions)
+)
 
-cps = [" ".join(path) for path in cps]
-ga_cps = [" ".join(path) for path in ga_cps]
+questions_ids = torch.nn.utils.rnn.pad_sequence(questions_ids)
+questionts_pad_idx = torch.sum(1 - torch.eq(questions_ids, 0).type(torch.LongTensor), 1).squeeze(0) - 1
 
-qs_ids = model.tokenize_sentence(questions)
-cps_ids = model.tokenize_sentence(cps)
-ga_ids = model.tokenize_sentence(ga_cps)
+questions_embs = model.embedder(questions_ids)
+questions_encs = model.q_encoder(questions_embs)
+questions_vecs = model.pooler(questions_encs, questionts_pad_idx)
 
-model.debug(qs_ids=qs_ids, cps=cps_ids, ga_ids=ga_ids)
+# 计算他们之间的距离

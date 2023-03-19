@@ -172,6 +172,8 @@ def retrieve_ConvRef_KB(instance, kb_retriever: sparql_test, tokenizer: BasicTok
         topic_entity = [instance.seed_entity]
         raw_candidate_paths = retrieve_via_frontier(frontier=topic_entity, topic_entity=topic_entity, raw_candidate_paths=raw_candidate_paths, kb_retriever=kb_retriever, question=instance.questions[time]['question'])
         instance.current_frontier = topic_entity
+        instance.current_topics = topic_entity
+        instance.historical_frontier = [instance.seed_entity_text]
     else:
         prev_const = re.search("^%s" % const_verification_dic, instance.questions[time - 1]['question'].lower())
         topic_entity: str = instance.questions[time]['NER'] # topic entity in ner result
@@ -179,13 +181,14 @@ def retrieve_ConvRef_KB(instance, kb_retriever: sparql_test, tokenizer: BasicTok
         pdb.set_trace() # <- 
 
         # identify the ambiguous ner result using bm25 and neighbour entities
-        if topic_entity != [] and len(entities_in_hops) != 0:
+        if topic_entity != []:
             key = (instance.seed_entity, None)
             key = ' '.join([' '.join(list(r)) if isinstance(r, tuple) else str(r) for r in key])
             query_statements = kb_retriever.STATEMENTS.get(key, [])
             entities_in_hops = []
             for s in list(query_statements.values()):
                 entities_in_hops += list(s)
+            # spend many time
             entities_in_hops = list(map(lambda e: kb_retriever.wikidata_id_to_label(e), filter(lambda e: re.search("Q\d+", e), entities_in_hops)))
             corpus = list(
                 map(lambda e: tokenizer.tokenize(e.lower()), entities_in_hops)
@@ -228,11 +231,13 @@ def retrieve_ConvRef_KB(instance, kb_retriever: sparql_test, tokenizer: BasicTok
         instance.statements += [filter_statements]
     instance.path2ans = path2ans
     sorted_path = sorted(instance.path2ans.keys())
-    ...
+
     gold_ans, do_month = clean_answer([instance.questions[time]['gold_answer']])
-    if re.search("^%s" % const_verification_dic, instance.questions[time]['question'].lower()):
-        gold_ans = [w for w in instance.questions[time]['relation']] if instance.questions[time]['relation'] != "" else instance.current_topics
-        psesudo_ans = [w.lower() for w in instance.questions[time]['gold_answer_text']]
+    psesudo_ans = [w.lower() for w in [instance.questions[time]['gold_answer_text']]]
+
+    # if re.search("^%s" % const_verification_dic, instance.questions[time]['question'].lower()):
+    #     gold_ans = [w for w in instance.questions[time]['relation']] if instance.questions[time]['relation'] != "" else instance.current_topics
+    #     psesudo_ans = [w.lower() for w in instance.questions[time]['gold_answer_text']]
     
     for p_idx, p in enumerate(sorted_path):
         pred_ans, _ = clean_answer(path2ans[p][0], do_month=do_month)
@@ -240,7 +245,7 @@ def retrieve_ConvRef_KB(instance, kb_retriever: sparql_test, tokenizer: BasicTok
             measure_F1 = generate_Inclusion(gold_ans, set(p))
         elif re.search("^%s" % const_verification_dic, instance.questions[time]['question'].lower()):
             measure_F1 = ['yes'] if generate_Inclusion(gold_ans, set(p)) == 1 else ['no']
-            if len(set(topic_entity) == 0):
+            if len(topic_entity) == 0:
                 measure_F1 = ['yes']
             measure_F1 = np.float16(measure_F1 == psesudo_ans)
         else:
@@ -277,16 +282,16 @@ def retrieve_ConvRef_KB(instance, kb_retriever: sparql_test, tokenizer: BasicTok
 
             if len(path) > max_cp_length:
                 max_cp_length = len(path)
-    
+
     instance.F1s = np.array(instance.F1s)
     instance.current_F1s = np.array(instance.current_F1s)
     const_ans = None
 
     if re.search("^%s" % const_verification_dic, instance.questions[time]['question'].lower()):
         if np.sum(instance.F1s) > 0.:
-            const_ans = ['yes']
+            const_ans = instance.questions[time]['gold_answer']
         else: # sum == 0
-            const_ans = ['no']
+            const_ans = ['yes'] if instance.questions[time]['gold_answer'] == 'No' else 'No'
 
     if np.sum(instance.F1s) == 0:
         instance.F1s[:] = 1.

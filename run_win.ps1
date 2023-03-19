@@ -3,9 +3,10 @@ python .\main.py `
 --train_folder .\ConvRef\data\ConvRef_gold_trainset.json `
 --dev_folder .\ConvRef\data\ConvRef_gold_devset.json `
 --test_folder .\ConvRef\data\ConvRef_gold_testset.json `
---do_train 1 `
+--do_train 0 `
 --do_eval 0 `
 --do_test 0 `
+--do_debug 1 `
 --epoch_nums 1 `
 --learning_rate 1e-5 `
 --vocab_txt .\config\vocab.txt `

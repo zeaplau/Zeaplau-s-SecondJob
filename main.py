@@ -16,7 +16,7 @@ from torch.optim import AdamW
 
 from tools.SPARQL_service import sparql_test
 from model.optimizer import Lion
-from model.lstm_ref import LSTMRef
+from model.lstm_ref import RefModel
 from model.load_convref import ConvRefDataset, ConvRefInstance
 from tools.tokenization import BasicTokenizer
 from tools.create_config import ModelConfig
@@ -79,14 +79,17 @@ def rank_cps(instance, dot_sim: torch.Tensor) -> Tuple[torch.Tensor, str]:
     return score, hit1_entity
 
 
-def get_loss_and_ans(model: LSTMRef, instance, cps_ids: torch.Tensor , time: int, alpha: int) -> Tuple[torch.Tensor, str, torch.Tensor]:
-    dot_sim, q_vec, ans_vecs, ga_vecs = model.forward(instance, cps_ids=cps_ids, time=time)
+def get_loss_and_ans(model: RefModel, instance, cps_ids: torch.Tensor , time: int, alpha: int) -> Tuple[torch.Tensor, str, torch.Tensor]:
+    topic_entity, idx = model.choose_topic_entity(instance.historical_frontier, instance.questions[time]['question'])
+    ref_qs = model.rewrite(topic_entity=topic_entity, questions=[instance.questions[time]['question']] + instance.questions[time]['reformulations'])
+
+    dot_sim, q_vec, ans_vecs, ga_vecs, nega_vecs = model.forward(instance, cps_ids=cps_ids, ref_qs=ref_qs, time=time)
     rank_logits, hit1_entity = rank_cps(instance, dot_sim)
-    loss = model.get_loss(dot_sim, instance.F1s, q_vec, ga_vecs, alpha)
+    loss = model.get_loss(dot_sim, instance.F1s, q_vec, ga_vecs, nega_vecs, alpha)
     return rank_logits, hit1_entity, loss
 
 
-def process(is_train, args, model: LSTMRef, optimizer: torch.optim.Optimizer, dataset, kb_retriever) -> Tuple[int, float, float, list]:
+def process(is_train, args, model: RefModel, optimizer: torch.optim.Optimizer, dataset, kb_retriever) -> Tuple[int, float, float, list]:
     """Process of train / valid / test
     """
 
@@ -161,11 +164,13 @@ if __name__ == "__main__":
     parser.add_argument("--train_folder", default=f"{ROOT_PATH}/ConvRef/data/ConvRef_gold_trainset.json", type=str, help="The path of trainset.")
     parser.add_argument("--dev_folder", default=f"{ROOT_PATH}/ConvRef/data/ConvRef_gold_devset.json", type=str, help="The path of devset.")
     parser.add_argument("--test_folder", default=f"{ROOT_PATH}/ConvRef/data/ConvRef_gold_testset.json", type=str, help="The path of testset.")
+    parser.add_argument("--debug_folder", default=f"{ROOT_PATH}/ConvRef/data/ConvRef_gold_debug.json", type=str, help="The path for debug.")
 
     # Train setting
     parser.add_argument("--do_train", default=1, type=int, help="Train the model")
     parser.add_argument("--do_eval", default=1, type=int, help="Valid the model.")
     parser.add_argument("--do_test", default=0, type=int, help="Test the model.")
+    parser.add_argument("--do_debug", default=0, type=int, help="--debug")
     parser.add_argument("--epoch_nums", default=0, type=int, help="Epoch for training")
     parser.add_argument("--learning_rate", default=1e-4, type=float, help="Learning rate for optimizer.")
     parser.add_argument("--vocab_txt", default=f"{ROOT_PATH}/config/vocab.txt", help="The vocabulary file for tokenizer.")
@@ -222,6 +227,10 @@ if __name__ == "__main__":
     os.makedirs(f"{ROOT_PATH}/ckpt/test/", exist_ok=True)
 
     # Load dataset
+    if args.do_debug:
+        debug_set = ConvRefDataset(args.vocab_txt, "trainset", args.debug_folder).unique_convs
+        logger.info(f"----- Instances num: {len(debug_set)} -----")
+        debug_set = [ConvRefInstance(conv) for conv in debug_set]
     if args.do_train:
         train_set = ConvRefDataset(args.vocab_txt, "trainset", args.train_folder).unique_convs
         logger.info(f"----- Instances num: {len(train_set)} -----")
@@ -241,7 +250,7 @@ if __name__ == "__main__":
 
     tokenizer = BasicTokenizer(args.vocab_txt)
     config = ModelConfig.from_json_file(args.config)
-    model = LSTMRef(config=config, tokenizer=tokenizer, device=device)
+    model = RefModel(config=config, tokenizer=tokenizer, device=device)
     optimizer = AdamW(params=list(model.parameters()), lr=args.learning_rate) if args.optimizer == "AdamW" else Lion(param=list(model.parameters()), lr=args.learning_rate)
     
     if os.path.exists(args.checkpoint):
@@ -254,6 +263,11 @@ if __name__ == "__main__":
     ...
     init_hit, init_reward, init_loss = 0, 99999., 99999.
     for epoch in range(args.epoch_nums):
+        if args.do_debug:
+            logger.info(f"Traninig epoch: {epoch}")
+            hit, loss, reward, path_logs = process(is_train=1, args=args, model=model, optimizer=optimizer,dataset=debug_set, kb_retriever=kb_retriever)
+            logger.info(f"Train epoch {epoch} hit {hit} avg_loss {loss} avg_reward {reward}")
+
         if args.do_train:
             logger.info(f"Traninig epoch: {epoch}")
             hit, loss, reward, path_logs = process(is_train=1, args=args, model=model, optimizer=optimizer,dataset=train_set, kb_retriever=kb_retriever)
