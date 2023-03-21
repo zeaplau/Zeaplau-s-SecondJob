@@ -43,18 +43,30 @@ def generate_record(ins_idx: int, time: int, instance, score: torch.Tensor, gold
     # ins_idx time predict_ans real_ans is_recalled is_const
     path_format = "{} {} {} {} {} {}"
     logs = []
-    
+    new_p2a = {}
+
     if const_ans is None:
         topk_idx = list(map(lambda x: x[::-1][:topk], np.argsort(score, axis=1)))
         is_recalled = np.array(gold_score != 0.).any()
         # get predict path
         orig_paths = [instance.orig_candidate_paths[p_idx] for p_idx in topk_idx[0]] # we only use orignal question
         answer_entities = [list(instance.path2ans[p][0])[0] for p in orig_paths]
+        
+        new_cp = orig_paths[0]
+        new_p2a[new_cp] = instance.path2ans[new_cp]
+
+        # update path2ans
+        if re.search("Q\d+", list(new_p2a[new_cp][0])[0]):
+            instance.path2ans = new_p2a
+        else:
+            instance.path2ans = {}
+
         for e in answer_entities:
             logs += [path_format.format(ins_idx, time, e, real_ans, is_recalled, 0)]
     else:
         # we do not consider the recall here, since if we regard that if the system can not recall the message, 
         # give the answer as 'no' defaultly
+        instance.path2ans = new_p2a
         is_recalled = 1. if (gold_score != 0.).any() else 0.
         for _ in range(topk):
             logs += [path_format.format(ins_idx, time, const_ans, real_ans, is_recalled, 1)]
@@ -67,11 +79,10 @@ def update_instance(instance, const_ans):
     instance.current_F1s = []
     instance.orig_F1s = []
     instance.F1s = []
-    if const_ans is not None:
-        instance.path2ans = []
 
 
 def rank_cps(instance, dot_sim: torch.Tensor) -> Tuple[torch.Tensor, str]:
+    new_p2a = {}
     score = F.softmax(dot_sim, dim=1)
     hit1_idx = torch.argmax(dot_sim, dim=1).detach().cpu().numpy()
     path = [instance.orig_candidate_paths[i] for i in hit1_idx]
@@ -82,6 +93,9 @@ def rank_cps(instance, dot_sim: torch.Tensor) -> Tuple[torch.Tensor, str]:
 def get_loss_and_ans(model: RefModel, instance, cps_ids: torch.Tensor , time: int, alpha: int) -> Tuple[torch.Tensor, str, torch.Tensor]:
     topic_entity, idx = model.choose_topic_entity(instance.historical_frontier, instance.questions[time]['question'])
     ref_qs = model.rewrite(topic_entity=topic_entity, questions=[instance.questions[time]['question']] + instance.questions[time]['reformulations'])
+
+    if time == 1:
+        pdb.set_trace()
 
     dot_sim, q_vec, ans_vecs, ga_vecs, nega_vecs = model.forward(instance, cps_ids=cps_ids, ref_qs=ref_qs, time=time)
     rank_logits, hit1_entity = rank_cps(instance, dot_sim)
@@ -99,15 +113,17 @@ def process(is_train, args, model: RefModel, optimizer: torch.optim.Optimizer, d
     total_loss, rewards, rewards_expect, path_logs = [], [], [], []
     hit1 = 0
     model.train() if is_train else model.eval()
-    pdb.set_trace() # <-
     for step, instance in enumerate(dataset):
         time = 0
+        const_ans = None
+        update_instance(instance=instance, const_ans=const_ans)
+        instance.reset()
         while time < len(instance.questions):
+
             if time == 1:
                 pdb.set_trace()
 
             const_ans = None
-            update_instance(instance=instance, const_ans=const_ans)
             cps, const_ans = retrieve_ConvRef_KB(instance=instance, kb_retriever=kb_retriever, tokenizer=tokenizer, time=time, is_train=is_train, not_update=True)
             if re.search("^%s" % const_interaction_dic, instance.questions[time]['question'].lower()):
                 # TODO: calculate the const question directly use 'yes' or 'no'
@@ -120,6 +136,8 @@ def process(is_train, args, model: RefModel, optimizer: torch.optim.Optimizer, d
                         reward, reward_expect = 0., 0.
                         rank_logits, hit1_entity, _loss = get_loss_and_ans(model, instance, cps_ids, time, args.alpha)
 
+                        pdb.set_trace()
+
                         # if the question is const_verification question, we simply use the retrieve result to judge
                         # the question answer
                         if const_ans is None:
@@ -127,7 +145,7 @@ def process(is_train, args, model: RefModel, optimizer: torch.optim.Optimizer, d
                             _loss.backward()
                             optimizer.step()
                             total_loss += [_loss.item()]
-                            reward, reward_expect = torch.argmax(torch.softmax(rank_logits, dim=1)).detach().cpu().numpy().item(), np.max(instance.F1s).item()
+                            reward, reward_expect = torch.max(torch.softmax(rank_logits, dim=1)).detach().cpu().numpy().item(), np.max(instance.F1s).item()
                         else:
                             reward, reward_expect = 1. if instance.questions[time]['gold_answer'].lower() in const_ans else 0., 0.5
 

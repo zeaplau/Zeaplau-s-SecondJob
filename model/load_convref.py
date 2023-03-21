@@ -94,7 +94,9 @@ class ConvRefInstance:
     
     def reset(self):
         self.historical_frontier = []
+        self.historical_frontier_text = []
         self.current_frontier = []
+        self.path2ans = {}
 
 # Dataset for the processed data
 class ConvRefDataset:

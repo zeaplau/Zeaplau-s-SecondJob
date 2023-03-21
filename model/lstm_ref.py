@@ -5,6 +5,7 @@ import pytorch_lightning as L
 import torch.nn.functional as F
 import numpy as np
 
+from copy import deepcopy
 from transformers import BartTokenizer, BertForMultipleChoice, BartForConditionalGeneration, BertTokenizer
 from typing import List, Tuple
 from torch.nn import KLDivLoss, MSELoss
@@ -81,13 +82,14 @@ class RefModel(nn.Module):
         return generate_sentences
 
 
-    def tokenize_sentence(self, sentences: List[str]) -> torch.Tensor:
+    def tokenize_sentence(self, sentences: List[str]) -> Tuple[torch.Tensor, torch.Tensor]:
         sentences_ids = [torch.tensor(self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(s)), dtype=torch.long) for s in sentences]
         return torch.nn.utils.rnn.pad_sequence(sentences_ids, batch_first=True).type(torch.LongTensor).to(self.device)
 
 
     def attention_fuse(self, q_tensors: torch.Tensor) -> torch.Tensor:
-        b, t, e = q_tensors.size()
+        b = 1
+        t, e = q_tensors.size()
         h = self.heads
         assert e == self.hidden_size, f"Input dim not match, expect {self.hidden_size}, get {e}."
 
@@ -113,13 +115,13 @@ class RefModel(nn.Module):
         
         out = torch.bmm(dot, values).view(b, h, t, s)
         out = out.transpose(1, 2).contiguous().view(b, t, s * h)
-        return out
+        return out, dot
 
 
     def get_loss(self, raw_logits: torch.Tensor, gold_score: np.ndarray, q_vecs: torch.Tensor, ga_vecs: torch.Tensor, nega_vecs: torch.Tensor, alpha: int = 0) -> torch.Tensor:
         logits = F.softmax(raw_logits, dim=1)
 
-        # FIXME use for debug
+        # use for debug
         if torch.isnan(logits).any():
             print(logits[:10])
             exit()
@@ -128,21 +130,12 @@ class RefModel(nn.Module):
             gold_score = torch.tensor(gold_score, dtype=torch.float)
 
         # KL_loss
-        kl_loss = nn.KLDivLoss(reduction='mean')(logits.log(), gold_score)
+        kl_loss = self.kl_loss.forward(logits.log(), gold_score)
 
         # NTXent Loss
-        cos_loss = nn.CosineSimilarity()
-        
+        ntx_loss = self.ntxent.forward(question_vec=q_vecs, positive_sample=ga_vecs, negative_sample=nega_vecs)
 
-        # CrossEntropyLoss
-        mse_total = torch.tensor([0.])
-        for i in range(q_vecs.shape[0]):
-            cos_sim = nn.CosineSimilarity()(q_vecs[i], ga_vecs).mean().unsqueeze(0)
-            mse_total += nn.MSELoss()(cos_sim, torch.tensor([1.])) # all the ga_vecs are gold_answer
-
-        mse_loss = mse_total / q_vecs.shape[0] # average CosinSimilarity
-
-        return alpha * kl_loss + (1 - alpha) * mse_loss
+        return alpha * kl_loss + (1 - alpha) * ntx_loss
 
 
     def debug(self, qs_ids, cps, ga_ids):
@@ -193,16 +186,17 @@ class RefModel(nn.Module):
             :param time: the turn of conversation
         """
 
-        pdb.set_trace()
+        gold_paths = list(map(lambda x: x + [instance.questions[time]['gold_answer_text']], instance.questions[time]['gold_paths']))
+        negative_sample = deepcopy(instance.candidate_paths)
 
-        gold_paths = map(lambda x: x + [instance.questions[time]['gold_answer_text']], instance.questions[time]['gold_paths'])
-        negative_sample = []
         for p in gold_paths:
-            negative_sample.remove(p)
+            if p in negative_sample:
+                negative_sample.remove(p)
+
         negative_ids = torch.nn.utils.rnn.pad_sequence(
             list(
-            map(lambda x: torch.tensor(self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(x))), ref_qs)
-            ), batch_first=True)
+            map(lambda x: torch.tensor(self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(" ".join(x)))), negative_sample)), 
+                batch_first=True)
 
         qs_ids = torch.nn.utils.rnn.pad_sequence(
             list(
@@ -236,19 +230,17 @@ class RefModel(nn.Module):
         ga_encs = self.dropout(ga_encs)
         nega_encs = self.dropout(nega_encs)
 
-        pdb.set_trace()
-
         # pool
         q_vecs = self.pooler(q_encs, q_idx)
         ans_vecs = self.pooler(ans_encs, ans_idx)
         ga_vecs = self.pooler(ga_encs, ga_idx)
         nega_vecs = self.pooler(nega_encs, nega_idx)
 
-        # if q_vecs.size()[1] != 1:
-        #     q_vecs = self.attention_fuse(q_vecs)
+        if q_vecs.size()[1] != 1:
+            q_vecs, dot = self.attention_fuse(q_vecs)
 
         # mean
         # q_vecs = torch.mean(q_vecs, dim=0)
-        dot_sim = torch.mm(q_vecs, ans_vecs.transpose(0, 1))
+        dot_sim = torch.mm(q_vecs.squeeze(0), ans_vecs.transpose(0, 1))
         return dot_sim, q_vecs, ans_vecs, ga_vecs, nega_vecs
 

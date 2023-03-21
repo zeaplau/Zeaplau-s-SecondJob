@@ -43,14 +43,17 @@ def generate_F1(pred_ans, ans):
     return F1
 
 
-def addin_historical_frontier(batch, kb_retriever, first_topic_entity, previous_topic_frontier, previous_ans_frontier, tokenizer):
+def addin_historical_frontier(batch, kb_retriever, first_topic_entity, previous_topic_frontier, previous_ans_frontier, tokenizer, time):
     '''
         Maintain the entities appeared in the previous conversation.
     '''
     node_num = len(batch.historical_frontier) + len(first_topic_entity+previous_topic_frontier+previous_ans_frontier)
     for te in (first_topic_entity + previous_ans_frontier + previous_ans_frontier):
-        if te not in batch.historical_frontier:
+        if te not in batch.historical_frontier and re.search("Q\d+", te) and re.search("^%s" % const_verification_dic, batch.questions[time - 1]['question'].lower()) is not None:
             batch.historical_frontier += [te]
+    batch.historical_frontier_text = list(
+        map(lambda x: kb_retriever.wikidata_id_to_label(x), batch.historical_frontier)
+    )
 
 
 def retrieve_via_frontier(frontier, topic_entity, raw_candidate_paths, kb_retriever, question=None, do_debug=False, not_update=True):
@@ -173,12 +176,13 @@ def retrieve_ConvRef_KB(instance, kb_retriever: sparql_test, tokenizer: BasicTok
         raw_candidate_paths = retrieve_via_frontier(frontier=topic_entity, topic_entity=topic_entity, raw_candidate_paths=raw_candidate_paths, kb_retriever=kb_retriever, question=instance.questions[time]['question'])
         instance.current_frontier = topic_entity
         instance.current_topics = topic_entity
-        instance.historical_frontier = [instance.seed_entity_text]
+        instance.historical_frontier = [instance.seed_entity]
+        instance.historical_frontier_text = [kb_retriever.wikidata_id_to_label(instance.seed_entity)]
     else:
+        pdb.set_trace()
+
         prev_const = re.search("^%s" % const_verification_dic, instance.questions[time - 1]['question'].lower())
         topic_entity: str = instance.questions[time]['NER'] # topic entity in ner result
-
-        pdb.set_trace() # <- 
 
         # identify the ambiguous ner result using bm25 and neighbour entities
         if topic_entity != []:
@@ -200,13 +204,16 @@ def retrieve_ConvRef_KB(instance, kb_retriever: sparql_test, tokenizer: BasicTok
 
         # FIXME
         prev_hit1p = sum([list(instance.path2ans[t])[:1] for t in instance.path2ans], []) if prev_const is None else {} # no answer entity if previous question is verification question
-        ans_frontiers = list(filter(lambda t: re.search("^Q", t), prev_hit1p)) if oracle == 0 else list(filter(lambda x: re.search(x), re.searchinstance.questions[time - 1]['gold_answer']))
+        ans_frontiers = list(filter(lambda t: re.search("^Q", t), instance.historical_frontier)) if oracle == 0 else list(filter(lambda x: re.search(x), re.search(instance.questions[time - 1]['gold_answer'])))
         prev_frontiers = list(set(sum([[w for w in t if re.search('^Q', w)] for t in instance.path2ans], [])))
-        sorted_frontiers = tuple(sorted(list(set(topic_entity + prev_frontiers))))
+        sorted_frontiers = tuple(sorted(list(set(topic_entity))))
         topic_entity = list(filter(lambda x: x not in ['UNK'], map(lambda x: x if re.search("^Q", ) else kb_retriever.wikidata_label_to_id(x), sorted_frontiers)))
         instance.current_topics = topic_entity
 
-        addin_historical_frontier(instance, kb_retriever, instance.seed_entity, prev_frontiers, ans_frontiers)
+        pdb.set_trace()
+
+        # add the new entity and update historical frontier text
+        addin_historical_frontier(instance, kb_retriever, instance.seed_entity, prev_frontiers, ans_frontiers, time=time)
 
         if re.search("^%s" % const_verification_dic, instance.questions[time]['question'].lower()) and len(set(topic_entity)) > 0:
             frontier = set(topic_entity)
