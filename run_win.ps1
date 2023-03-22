@@ -8,6 +8,7 @@ python .\main.py `
 --do_test 0 `
 --do_debug 1 `
 --epoch_nums 1 `
+--size 500 `
 --learning_rate 1e-5 `
 --vocab_txt .\config\vocab.txt `
 --config .\config\config_SimpleRanker.json `

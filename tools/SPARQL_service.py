@@ -438,7 +438,7 @@ class sparql_test(object):
         self.OUTDEGREE[e] = name
         return name
 
-    def wikidata_id_to_label(self, e):
+    def wikidata_id_to_label(self, e, ner=False):
         if not re.search('^[QP]', e):
             if is_year(e):
                 return convert_year_to_timestamp(e)
@@ -448,8 +448,11 @@ class sparql_test(object):
                 return re.sub(' minute$', '', e)
             return e
         #if re.search('^P', e): e = re.sub('^P', 'Q', e)
-        if (e in self.M2N): return self.M2N[e]
+        if (e in self.M2N): 
+            return self.M2N[e]
         name = u'UNK'
+        if ner:
+            return name
         # sparql = SPARQLWrapper(self.SPARQLPATH, agent=AGENT)
         sparql_txt = """SELECT ?t WHERE {wd:%s rdfs:label ?t.
         FILTER (langMatches(lang(?t), 'en'))}""" %(e)

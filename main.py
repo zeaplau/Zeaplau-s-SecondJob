@@ -91,11 +91,9 @@ def rank_cps(instance, dot_sim: torch.Tensor) -> Tuple[torch.Tensor, str]:
 
 
 def get_loss_and_ans(model: RefModel, instance, cps_ids: torch.Tensor , time: int, alpha: int) -> Tuple[torch.Tensor, str, torch.Tensor]:
-    topic_entity, idx = model.choose_topic_entity(instance.historical_frontier, instance.questions[time]['question'])
+    entities_text = [kb_retriever.wikidata_id_to_label(x) for x in instance.historical_frontier]
+    topic_entity, idx = model.choose_topic_entity(topic_entities=entities_text, question=instance.questions[time]['question'])
     ref_qs = model.rewrite(topic_entity=topic_entity, questions=[instance.questions[time]['question']] + instance.questions[time]['reformulations'])
-
-    if time == 1:
-        pdb.set_trace()
 
     dot_sim, q_vec, ans_vecs, ga_vecs, nega_vecs = model.forward(instance, cps_ids=cps_ids, ref_qs=ref_qs, time=time)
     rank_logits, hit1_entity = rank_cps(instance, dot_sim)
@@ -114,14 +112,12 @@ def process(is_train, args, model: RefModel, optimizer: torch.optim.Optimizer, d
     hit1 = 0
     model.train() if is_train else model.eval()
     for step, instance in enumerate(dataset):
+        pdb.set_trace()
         time = 0
         const_ans = None
-        update_instance(instance=instance, const_ans=const_ans)
         instance.reset()
         while time < len(instance.questions):
-
-            if time == 1:
-                pdb.set_trace()
+            update_instance(instance=instance, const_ans=const_ans)
 
             const_ans = None
             cps, const_ans = retrieve_ConvRef_KB(instance=instance, kb_retriever=kb_retriever, tokenizer=tokenizer, time=time, is_train=is_train, not_update=True)
@@ -135,8 +131,6 @@ def process(is_train, args, model: RefModel, optimizer: torch.optim.Optimizer, d
                     with torch.autograd.set_detect_anomaly(True):
                         reward, reward_expect = 0., 0.
                         rank_logits, hit1_entity, _loss = get_loss_and_ans(model, instance, cps_ids, time, args.alpha)
-
-                        pdb.set_trace()
 
                         # if the question is const_verification question, we simply use the retrieve result to judge
                         # the question answer
@@ -175,6 +169,15 @@ def process(is_train, args, model: RefModel, optimizer: torch.optim.Optimizer, d
     logger.info(process_log_format.format(avg_loss, avg_reward, avg_reward_boundry))
     return hit1, avg_loss, avg_reward, path_logs
 
+def write_logs(path_logs: List[str], args):
+    logger.info(f"Paths predict save at {ROOT_PATH}/ckpt/{args.checkpoint}")
+    try:
+        with open(f"{ROOT_PATH}/ckpt/{args.checkpoint}", "w", encoding="utf-8") as f:
+            f.write("\n".join(path_logs))
+    except:
+        logger.info("Error happen.")
+        exit(1)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # Dataset setting
@@ -190,6 +193,7 @@ if __name__ == "__main__":
     parser.add_argument("--do_test", default=0, type=int, help="Test the model.")
     parser.add_argument("--do_debug", default=0, type=int, help="--debug")
     parser.add_argument("--epoch_nums", default=0, type=int, help="Epoch for training")
+    parser.add_argument("--size", default=500, type=int, help="Train scale of each epoch.")
     parser.add_argument("--learning_rate", default=1e-4, type=float, help="Learning rate for optimizer.")
     parser.add_argument("--vocab_txt", default=f"{ROOT_PATH}/config/vocab.txt", help="The vocabulary file for tokenizer.")
     parser.add_argument("--config", default=f"{ROOT_PATH}/config/config_SimpleRanker.json", type=str, help="The path of config file.")
@@ -279,7 +283,7 @@ if __name__ == "__main__":
             assert f"{args.checkpoint} is not compatible for current model."
 
     ...
-    init_hit, init_reward, init_loss = 0, 99999., 99999.
+    init_hit, init_reward, init_loss = 0, 0., 99999.
     for epoch in range(args.epoch_nums):
         if args.do_debug:
             logger.info(f"Traninig epoch: {epoch}")
@@ -288,12 +292,13 @@ if __name__ == "__main__":
 
         if args.do_train:
             logger.info(f"Traninig epoch: {epoch}")
-            hit, loss, reward, path_logs = process(is_train=1, args=args, model=model, optimizer=optimizer,dataset=train_set, kb_retriever=kb_retriever)
+            hit, loss, reward, path_logs = process(is_train=1, args=args, model=model, optimizer=optimizer,dataset=train_set[:args.size], kb_retriever=kb_retriever)
             logger.info(f"Train epoch {epoch} hit {hit} avg_loss {loss} avg_reward {reward}")
+            random.shuffle(train_set)
 
         if args.do_eval:
             logger.info(f"Evaluating epoch: {epoch}")
-            hit, loss, reward, path_logs = process(is_train=0, args=args, model=model, optimizer=optimizer, dataset=dev_set, kb_retriever=kb_retriever)
+            hit, loss, reward, path_logs = process(is_train=0, args=args, model=model, optimizer=optimizer, dataset=dev_set[:args.size / 5], kb_retriever=kb_retriever)
             logger.info(f"Valid epoch {epoch} hit {hit} avg_loss {loss} avg_reward {reward}")
             if reward > init_reward:
                 init_reward = reward
