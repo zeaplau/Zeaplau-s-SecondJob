@@ -1,6 +1,7 @@
 import json
 import os
 import argparse
+import re
 
 from pathlib import Path
 
@@ -26,6 +27,14 @@ if __name__ == "__main__":
         for q_idx, qa in enumerate(conv['questions']):
             new_qa = qa
             new_qa['NER'] = ners[c_idx][q_idx]
+
+            if isinstance(qa['gold_answer'], list):
+                new_qa['gold_answer'] = qa['gold_answer'][0]
+            else:
+                try:
+                    new_qa['gold_answer'] = re.search("Q\d+", qa['gold_answer']).group() if re.search("Q\d+", qa['gold_answer']) else qa['gold_answer']
+                except:
+                    pdb.set_trace()
             new_qas.append(new_qa)
         new_conv['questions'] = new_qas
         new_convs.append(new_conv)

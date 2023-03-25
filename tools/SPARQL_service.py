@@ -72,12 +72,13 @@ class sparql_test(object):
     '''A class for sparql retrival'''
     def __init__(self):
         self.SPARQLPATH = "https://query.wikidata.org/sparql"
-        self.M2N, self.STATEMENTS, self.QUERY_TXT = {}, defaultdict(dict), set()
+        self.M2N, self.L2I, self.STATEMENTS, self.QUERY_TXT = {}, {}, defaultdict(dict), set()
         self.OUTDEGREE, self.TYPE = {}, {}
         #self.headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/50.0.2661.102 Safari/537.36'}
 
-    def load_cache(self, M2N_file, STATEMENTS_file, QUERY_file, TYPE_file, OUTDEGREE_file):
+    def load_cache(self, M2N_file, L2I_file, STATEMENTS_file, QUERY_file, TYPE_file, OUTDEGREE_file):
         self.M2N_file = M2N_file
+        self.L2I = L2I_file
         self.STATEMENTS_file = STATEMENTS_file
         self.QUERY_file = QUERY_file
         self.TYPE_file = TYPE_file
@@ -86,6 +87,9 @@ class sparql_test(object):
         if os.path.exists(M2N_file):
             #self.M2N = pickle.load(open(M2N_file))
             self.M2N = json.load(open(M2N_file))
+        if os.path.exists(L2I_file):
+            #self.M2N = pickle.load(open(M2N_file))
+            self.L2I= json.load(open(L2I_file))
         if os.path.exists(STATEMENTS_file):
             #self.STATEMENTS = pickle.load(open(STATEMENTS_file))
             STATEMENTS = json.load(open(STATEMENTS_file))
@@ -452,7 +456,7 @@ class sparql_test(object):
             return self.M2N[e]
         name = u'UNK'
         if ner:
-            return name
+            return e
         # sparql = SPARQLWrapper(self.SPARQLPATH, agent=AGENT)
         sparql_txt = """SELECT ?t WHERE {wd:%s rdfs:label ?t.
         FILTER (langMatches(lang(?t), 'en'))}""" %(e)
@@ -486,6 +490,8 @@ class sparql_test(object):
         else:
             const = ""
         name = u'UNK'
+        if "cloudam" in os.getcwd():
+            return name
         # sparql_txt = """SELECT ?t WHERE {?t rdfs:label ?name.%s
         #                 FILTER (langMatches(lang(?name), 'en')).
         #                 FILTER regex(?name, "%s")} limit 10""" %(const, e)

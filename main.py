@@ -221,6 +221,7 @@ if __name__ == "__main__":
     cache_dir = args.cache_dir
     kb_retriever.load_cache(
         "%s/M2N.json" % cache_dir, 
+        "%s/L2I.json" % cache_dir,
         "%s/STATEMENTS.json" % cache_dir, 
         "%s/QUERY.json" % cache_dir, 
         "%s/TYPE.json" % cache_dir, 

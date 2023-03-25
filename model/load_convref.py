@@ -37,7 +37,7 @@ def gold_dataset(set_type: str):
         conversations = json.load(f)
     
     # qa with gold path
-    with open(f"{ROOT_PATH}/ConvRef/{set_type}_gold.json", "r", encoding="utf-8") as f:
+    with open(f"{ROOT_PATH}/ConvRef/data/{set_type}_gold.json", "r", encoding="utf-8") as f:
         gold_p = json.load(f)
     
     gold_ans = []
@@ -46,7 +46,7 @@ def gold_dataset(set_type: str):
         gold_ans.append(gold_paths)
 
     # remote qa without gold ans
-    if set_type in ['trainset', 'devset', 'debug']:
+    if set_type in ['trainset', 'devset', 'testset', 'debug']:
         new_convs = []
         for c_idx, conv in enumerate(conversations):
             new_qas = []
@@ -56,9 +56,13 @@ def gold_dataset(set_type: str):
                 new_qa = qa
                 new_qa["gold_paths"] = gold_ans[c_idx][q_idx]
                 new_qa["reformulations"] = new_ref
+                try:
+                    new_qa["gold_answer"] = re.search("Q\d+", qa["gold_answer"]).group() if re.search("Q\d+", qa["gold_answer"]) else qa["gold_answer"]
+                except:
+                    pdb.set_trace()
                 new_qas.append(new_qa)
             new_conv["questions"] = new_qas
-            new_conv["seed_entity"] = re.search("^Q\d*", conv["seed_entity"]).group()
+            new_conv["seed_entity"] = re.search("Q\d*", conv["seed_entity"]).group()
             new_convs.append(new_conv)
         with open(f"{ROOT_PATH}/ConvRef/data/ConvRef_gold_{set_type}.json", "w", encoding="utf-8") as f:
             json.dump(new_convs, f)
@@ -118,7 +122,7 @@ class ConvRefDataset:
         self.unique_convs = []
         for conv in self.conversations:
             unique_conv = conv
-            unique_conv["seed_entity"] = re.search("Q\d+", conv["seed_entity"]).group()
+            unique_conv["seed_entity"] = conv["seed_entity"]
             unique_qas = []
             for qa in conv["questions"]:
                 unique_qa = qa
@@ -139,7 +143,7 @@ class ConvRefDataset:
 
                 unique_qa["qs_id"] = qs_tensor
                 unique_qa["ans_id"] = ans_tensor
-                unique_qa["gold_answer"] = re.search("Q\d+", qa["gold_answer"]).group() if re.search("Q\d+", qa["gold_answer"]) else qa["gold_answer"]
+                unique_qa["gold_answer"] = qa["gold_answer"]
                 unique_qa["relation"] = ""
                 unique_qas.append(unique_qa)
             unique_conv["questions"] = unique_qas
