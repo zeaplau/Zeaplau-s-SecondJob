@@ -78,7 +78,7 @@ class sparql_test(object):
 
     def load_cache(self, M2N_file, L2I_file, STATEMENTS_file, QUERY_file, TYPE_file, OUTDEGREE_file):
         self.M2N_file = M2N_file
-        self.L2I = L2I_file
+        self.L2I_file = L2I_file
         self.STATEMENTS_file = STATEMENTS_file
         self.QUERY_file = QUERY_file
         self.TYPE_file = TYPE_file
@@ -455,7 +455,7 @@ class sparql_test(object):
         if (e in self.M2N): 
             return self.M2N[e]
         name = u'UNK'
-        if ner:
+        if ner or "cloudam" in os.getcwd():
             return e
         # sparql = SPARQLWrapper(self.SPARQLPATH, agent=AGENT)
         sparql_txt = """SELECT ?t WHERE {wd:%s rdfs:label ?t.
@@ -482,8 +482,8 @@ class sparql_test(object):
 
     def wikidata_label_to_id(self, e, raw_const=None):
         # sparql = SPARQLWrapper(self.SPARQLPATH, agent=AGENT)
-        key = str((e, raw_const))
-        if (key in self.M2N): return self.M2N[key]
+        key = e
+        if (key in self.L2I): return self.L2I[key]
         if (raw_const is not None):
             const = ['wd:%s' %c for c in raw_const]
             const = "?e1 ?r ?t. VALUES ?e1 {%s}" %(' '.join(const))

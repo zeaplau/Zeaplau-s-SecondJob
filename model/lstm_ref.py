@@ -25,6 +25,7 @@ class NTXentLoss(nn.Module):
 class RefModel(nn.Module):
     def __init__(self, config, tokenizer: BasicTokenizer, device=None):
         super(RefModel, self).__init__()
+        self.config = config
         self.device = device
         self.tokenizer = tokenizer
         self.hidden_size = config.hidden_size
@@ -41,6 +42,8 @@ class RefModel(nn.Module):
         self.q_encoder = nn.LSTM(input_size=self.hidden_size, hidden_size=int(self.hidden_size / 2), bidirectional=True, batch_first=True)
         self.cp_encoder = nn.LSTM(input_size=self.hidden_size, hidden_size=int(self.hidden_size / 2), bidirectional=True, batch_first=True)
 
+        self.apply(self.init_glove_weight)
+
         self.kl_loss = nn.KLDivLoss(reduction="mean")
         self.ntxent = QANTXent(temperature=0.07)
 
@@ -52,7 +55,21 @@ class RefModel(nn.Module):
         # Rewrite the question into complete one
         self.rewrite_tokenizer: BartTokenizer = BartTokenizer.from_pretrained("eugenesiow/bart-paraphrase") if not os.path.exists(config.BART) else BartTokenizer.from_pretrained(config.BART)
         self.rewrite_model: BartForConditionalGeneration = BartForConditionalGeneration.from_pretrained("eugenesiow/bart-paraphrase") if not os.path.exists(config.BART) else BartForConditionalGeneration.from_pretrained(config.BART)
-# 
+
+
+    def init_glove_weight(self, module):
+        if isinstance(module, (nn.Linear)):
+            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+        elif isinstance(module, (nn.Embedding)) and self.config.hidden_size == 300 and module.weight.data.size(0) > 1000:
+            if os.path.exists(self.config.Word2vec_path):
+                embedding = np.load(self.config.Word2vec_path)
+                module.weight.data = torch.tensor(embedding, dtype=torch.float)
+                print('Pretrained GloVe embeddings init')
+            else:
+                assert f"{self.config.Word2vec_path} is not found."
+        if isinstance(module, (nn.Linear)) and module.bias is not None:
+            module.bias.data.zero_()
+
 
     def init_hidden(self) -> Tuple[torch.Tensor, torch.Tensor]:
         self.hidden = [self.initial_hidden]

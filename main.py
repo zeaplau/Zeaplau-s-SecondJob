@@ -105,14 +105,13 @@ def process(is_train, args, model: RefModel, optimizer: torch.optim.Optimizer, d
     """Process of train / valid / test
     """
 
-    process_log_format = "avg_loss: {} hits:{} avg_reward: {} reward_boundry: {}"
+    process_log_format = "avg_loss: {} avg_reward: {} reward_boundry: {}"
 
     # retrieve kb and get path
     total_loss, rewards, rewards_expect, path_logs = [], [], [], []
     hit1 = 0
     model.train() if is_train else model.eval()
     for step, instance in enumerate(dataset):
-        pdb.set_trace()
         time = 0
         const_ans = None
         instance.reset()
@@ -153,7 +152,7 @@ def process(is_train, args, model: RefModel, optimizer: torch.optim.Optimizer, d
                         if const_ans is None:
                             rank_logits, hit1_entity, _loss = get_loss_and_ans(model, instance, cps_ids, time, args.alpha)
                             total_loss += [_loss.item()]
-                            reward, reward_expect = torch.argmax(torch.softmax(rank_logits, dim=2)).detach().cpu().numpy().item(), np.max(instance.F1s).item()
+                            reward, reward_expect = torch.max(torch.softmax(rank_logits, dim=2)).detach().cpu().numpy().item(), np.max(instance.F1s).item()
                         else:
                             reward, reward_expect = 1. if instance.questions[time]['gold_answer'].lower() in const_ans else 0., 0.5
 
@@ -163,6 +162,8 @@ def process(is_train, args, model: RefModel, optimizer: torch.optim.Optimizer, d
                         p_logs = generate_record(ins_idx=step, time=time, instance=instance, score=rank_logits, gold_score=instance.F1s, real_ans=instance.questions[time]['gold_answer_entity'], topk=10, const_ans=const_ans)
                         path_logs += p_logs
             time += 1
+        if is_train and step % 100 == 0:
+            logger.info(f"avg_loss: {np.mean(total_loss)} avg_reward: {rewards}")
 
     avg_reward, avg_reward_boundry = np.mean(rewards), np.mean(rewards_expect)
     avg_loss = sum(total_loss) / (len(dataset) * 5)
@@ -294,7 +295,7 @@ if __name__ == "__main__":
         if args.do_train:
             logger.info(f"Traninig epoch: {epoch}")
             hit, loss, reward, path_logs = process(is_train=1, args=args, model=model, optimizer=optimizer,dataset=train_set[:args.size], kb_retriever=kb_retriever)
-            logger.info(f"Train epoch {epoch} hit {hit} avg_loss {loss} avg_reward {reward}")
+            logger.info(f"Train epoch {epoch} avg_loss {loss} avg_reward {reward}")
             random.shuffle(train_set)
 
         if args.do_eval:
@@ -303,17 +304,18 @@ if __name__ == "__main__":
             logger.info(f"Valid epoch {epoch} hit {hit} avg_loss {loss} avg_reward {reward}")
             if reward > init_reward:
                 init_reward = reward
-                torch.save(model.state_dict(), f"{ROOT_PATH}/ckpt/{args.checkpoint}.pth")
-                logger.info(f"Model save at {ROOT_PATH}/ckpt/{args.checkpoint}.pth")
+                torch.save(model.state_dict(), f"{ROOT_PATH}/ckpt/valid/{args.checkpoint}.pth")
+                logger.info(f"Model save at {ROOT_PATH}/ckpt/valid/{args.checkpoint}.pth")
                 with open(f"{ROOT_PATH}/ckpt/valid/{args.checkpoint}.log", "w", encoding="utf-8") as f:
                     f.write("\n".join(path_logs))
                 logger.info(f"Valid result save at {ROOT_PATH}/ckpt/{args.checkpoint}.log")
             kb_retriever.save_cache()
 
         if args.do_test:
-            logger.info(f"Testing {ROOT_PATH}/ckpt/{args.checkpoint}.pth")
+            logger.info(f"Testing {ROOT_PATH}/ckpt/test/{args.checkpoint}.pth")
             hit, loss, reward, path_logs = process(is_train=0, args=args, model=model, optimizer=optimizer, dataset=test_set, kb_retriever=kb_retriever)
             with open(f"{ROOT_PATH}/ckpt/test/{args.checkpoint}.log", "w", encoding="utf-8") as f:
                 f.write("\n".join(path_logs))
-            logger.info(f"Test result save at {ROOT_PATH}/ckpt/{args.checkpoint}.logs")
+            logger.info(f"Test result save at {ROOT_PATH}/ckpt/test/{args.checkpoint}.logs")
             kb_retriever.save_cache()
+    logger.info("End")
