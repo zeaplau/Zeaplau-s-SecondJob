@@ -4,6 +4,7 @@
 /config/embedding.npy
 /config/PLM/*
 /logs
+/ckpt
 align_ners.py
 log_test.py
 cover_rage.py

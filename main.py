@@ -8,6 +8,7 @@ import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 
+from tqdm import trange, tqdm
 from datetime import datetime
 from typing import Tuple, List
 from pathlib import Path
@@ -41,7 +42,7 @@ def generate_record(ins_idx: int, time: int, instance, score: torch.Tensor, gold
         gold_score = gold_score.detach().cpu().numpy()
     
     # ins_idx time predict_ans real_ans is_recalled is_const
-    path_format = "{} {} {} {} {} {}"
+    path_format = "{}, {}, {}, {}, {}, {}"
     logs = []
     new_p2a = {}
 
@@ -90,28 +91,28 @@ def rank_cps(instance, dot_sim: torch.Tensor) -> Tuple[torch.Tensor, str]:
     return score, hit1_entity
 
 
-def get_loss_and_ans(model: RefModel, instance, cps_ids: torch.Tensor , time: int, alpha: int) -> Tuple[torch.Tensor, str, torch.Tensor]:
+def get_loss_and_ans(model: RefModel, instance, cps_ids: torch.Tensor , time: int, alpha: int, is_const) -> Tuple[torch.Tensor, str, torch.Tensor]:
     entities_text = [kb_retriever.wikidata_id_to_label(x) for x in instance.historical_frontier]
     topic_entity, idx = model.choose_topic_entity(topic_entities=entities_text, question=instance.questions[time]['question'])
     ref_qs = model.rewrite(topic_entity=topic_entity, questions=[instance.questions[time]['question']] + instance.questions[time]['reformulations'])
 
-    dot_sim, q_vec, ans_vecs, ga_vecs, nega_vecs = model.forward(instance, cps_ids=cps_ids, ref_qs=ref_qs, time=time)
+    dot_sim, q_vec, ans_vecs, ga_vecs, nega_vecs = model.forward(instance, cps_ids=cps_ids, ref_qs=ref_qs[:1], time=time)
     rank_logits, hit1_entity = rank_cps(instance, dot_sim)
-    loss = model.get_loss(dot_sim, instance.F1s, q_vec, ga_vecs, nega_vecs, alpha)
+    loss = model.get_loss(is_const, dot_sim, instance.F1s, q_vec, ga_vecs, nega_vecs, alpha)
     return rank_logits, hit1_entity, loss
 
 
 def process(is_train, args, model: RefModel, optimizer: torch.optim.Optimizer, dataset, kb_retriever) -> Tuple[int, float, float, list]:
     """Process of train / valid / test
     """
-
     process_log_format = "avg_loss: {} avg_reward: {} reward_boundry: {}"
 
     # retrieve kb and get path
     total_loss, rewards, rewards_expect, path_logs = [], [], [], []
+    miss_cache = 0
     hit1 = 0
     model.train() if is_train else model.eval()
-    for step, instance in enumerate(dataset):
+    for step, instance in enumerate(tqdm(dataset, desc="Instances ")):
         time = 0
         const_ans = None
         instance.reset()
@@ -120,6 +121,9 @@ def process(is_train, args, model: RefModel, optimizer: torch.optim.Optimizer, d
 
             const_ans = None
             cps, const_ans = retrieve_ConvRef_KB(instance=instance, kb_retriever=kb_retriever, tokenizer=tokenizer, time=time, is_train=is_train, not_update=True)
+            if len(cps) == 0:
+                miss_cache += 1
+                break
             if re.search("^%s" % const_interaction_dic, instance.questions[time]['question'].lower()):
                 # TODO: calculate the const question directly use 'yes' or 'no'
                 ...
@@ -127,9 +131,15 @@ def process(is_train, args, model: RefModel, optimizer: torch.optim.Optimizer, d
                 cps_join = [" ".join(cp) for cp in cps]
                 cps_ids = model.tokenize_sentence(cps_join)
                 if is_train:
+                    # print(f"debug {step}-{time}: {instance.historical_frontier}")
+
                     with torch.autograd.set_detect_anomaly(True):
                         reward, reward_expect = 0., 0.
-                        rank_logits, hit1_entity, _loss = get_loss_and_ans(model, instance, cps_ids, time, args.alpha)
+                        rank_logits, hit1_entity, _loss = get_loss_and_ans(model, instance, cps_ids, time, args.alpha, const_ans)
+
+                        # find a bug, ignore this conversation
+                        if isinstance(_loss, torch.Tensor) and torch.isnan(_loss).any():
+                            break
 
                         # if the question is const_verification question, we simply use the retrieve result to judge
                         # the question answer
@@ -150,24 +160,26 @@ def process(is_train, args, model: RefModel, optimizer: torch.optim.Optimizer, d
                 else:
                     with torch.no_grad():
                         if const_ans is None:
-                            rank_logits, hit1_entity, _loss = get_loss_and_ans(model, instance, cps_ids, time, args.alpha)
+                            rank_logits, hit1_entity, _loss = get_loss_and_ans(model, instance, cps_ids, time, args.alpha, const_ans)
                             total_loss += [_loss.item()]
-                            reward, reward_expect = torch.max(torch.softmax(rank_logits, dim=2)).detach().cpu().numpy().item(), np.max(instance.F1s).item()
+                            reward, reward_expect = torch.max(torch.softmax(rank_logits, dim=1)).detach().cpu().numpy().item(), np.max(instance.F1s).item()
                         else:
                             reward, reward_expect = 1. if instance.questions[time]['gold_answer'].lower() in const_ans else 0., 0.5
 
                         rewards += [reward]
                         rewards_expect += [reward_expect]
 
-                        p_logs = generate_record(ins_idx=step, time=time, instance=instance, score=rank_logits, gold_score=instance.F1s, real_ans=instance.questions[time]['gold_answer_entity'], topk=10, const_ans=const_ans)
+                        p_logs = generate_record(ins_idx=step, time=time, instance=instance, score=rank_logits, gold_score=instance.F1s, real_ans=instance.questions[time]['gold_answer'], topk=10, const_ans=const_ans)
                         path_logs += p_logs
             time += 1
-        if is_train and step % 100 == 0:
-            logger.info(f"avg_loss: {np.mean(total_loss)} avg_reward: {rewards}")
+        if step % 100 == 0:
+            logger.info(f"Miss: {miss_cache} avg_reward_boundry: {np.mean(rewards_expect)} avg_reward: {np.mean(rewards)} avg_loss: {np.mean(total_loss)}")
 
     avg_reward, avg_reward_boundry = np.mean(rewards), np.mean(rewards_expect)
+    # each conversation contains 5 qa
     avg_loss = sum(total_loss) / (len(dataset) * 5)
     logger.info(process_log_format.format(avg_loss, avg_reward, avg_reward_boundry))
+
     return hit1, avg_loss, avg_reward, path_logs
 
 def write_logs(path_logs: List[str], args):
@@ -207,7 +219,7 @@ if __name__ == "__main__":
     parser.add_argument("--cache_dir", default=f"{ROOT_PATH}/ConvRef/cache/", type=str, help="The dir of cache.")
 
     # Model path
-    parser.add_argument("--model_path", default=None, type=str, help="The path of the model.")
+    parser.add_argument("--eval_model", default=None, type=str, help="The path of the model to eval.")
 
     args = parser.parse_args()
 
@@ -222,7 +234,7 @@ if __name__ == "__main__":
     cache_dir = args.cache_dir
     kb_retriever.load_cache(
         "%s/M2N.json" % cache_dir, 
-        "%s/L2I.json" % cache_dir,
+        "%s/L2I.json" % cache_dir, 
         "%s/STATEMENTS.json" % cache_dir, 
         "%s/QUERY.json" % cache_dir, 
         "%s/TYPE.json" % cache_dir, 
@@ -274,19 +286,28 @@ if __name__ == "__main__":
 
     tokenizer = BasicTokenizer(args.vocab_txt)
     config = ModelConfig.from_json_file(args.config)
-    model = RefModel(config=config, tokenizer=tokenizer, device=device)
-    optimizer = AdamW(params=list(model.parameters()), lr=args.learning_rate) if args.optimizer == "AdamW" else Lion(param=list(model.parameters()), lr=args.learning_rate)
+    model = RefModel(config=config, tokenizer=tokenizer, device=device).to(device)
+
+    # freeze PLM
+    for param in model.choice_model.named_parameters():
+        param[1].requires_grad = False
+    for param in model.rewrite_model.named_parameters():
+        param[1].requires_grad = False
+
+    optimizer = AdamW(params=list(filter(lambda x: x.requires_grad, model.parameters())), lr=args.learning_rate) if args.optimizer == "AdamW" else Lion(params=list(filter(lambda x: x.requires_grad, model.parameters())), lr=args.learning_rate)
     
-    if os.path.exists(args.checkpoint):
+    if os.path.exists(args.eval_model):
         try:
-            model_dict = torch.load(args.checkpoint, map_location="cpu")
+            logger.info(f"Eval model from {args.eval_model}")
+            model_dict = torch.load(args.eval_model, map_location="cpu")
             model.load_state_dict(model_dict, strict=False)
         except:
-            assert f"{args.checkpoint} is not compatible for current model."
+            assert f"{args.eval_model} is not compatible for current model."
+    else:
+        logger.info(f"Eval result at ./ckpt/valid/{args.checkpoint}")
 
-    ...
     init_hit, init_reward, init_loss = 0, 0., 99999.
-    for epoch in range(args.epoch_nums):
+    for epoch in trange(args.epoch_nums):
         if args.do_debug:
             logger.info(f"Traninig epoch: {epoch}")
             hit, loss, reward, path_logs = process(is_train=1, args=args, model=model, optimizer=optimizer,dataset=debug_set, kb_retriever=kb_retriever)
@@ -295,12 +316,12 @@ if __name__ == "__main__":
         if args.do_train:
             logger.info(f"Traninig epoch: {epoch}")
             hit, loss, reward, path_logs = process(is_train=1, args=args, model=model, optimizer=optimizer,dataset=train_set[:args.size], kb_retriever=kb_retriever)
-            logger.info(f"Train epoch {epoch} avg_loss {loss} avg_reward {reward}")
+            logger.info(f"Train epoch {epoch} hit {hit} avg_loss {loss} avg_reward {reward}")
             random.shuffle(train_set)
 
         if args.do_eval:
             logger.info(f"Evaluating epoch: {epoch}")
-            hit, loss, reward, path_logs = process(is_train=0, args=args, model=model, optimizer=optimizer, dataset=dev_set[:args.size / 5], kb_retriever=kb_retriever)
+            hit, loss, reward, path_logs = process(is_train=0, args=args, model=model, optimizer=optimizer, dataset=dev_set[:int(args.size / 5)], kb_retriever=kb_retriever)
             logger.info(f"Valid epoch {epoch} hit {hit} avg_loss {loss} avg_reward {reward}")
             if reward > init_reward:
                 init_reward = reward
@@ -308,14 +329,14 @@ if __name__ == "__main__":
                 logger.info(f"Model save at {ROOT_PATH}/ckpt/valid/{args.checkpoint}.pth")
                 with open(f"{ROOT_PATH}/ckpt/valid/{args.checkpoint}.log", "w", encoding="utf-8") as f:
                     f.write("\n".join(path_logs))
-                logger.info(f"Valid result save at {ROOT_PATH}/ckpt/{args.checkpoint}.log")
-            kb_retriever.save_cache()
+                logger.info(f"Valid result save at {ROOT_PATH}/ckpt/valid/{args.checkpoint}.log")
+            # kb_retriever.save_cache()
 
         if args.do_test:
-            logger.info(f"Testing {ROOT_PATH}/ckpt/test/{args.checkpoint}.pth")
+            logger.info(f"Testing {ROOT_PATH}/ckpt/{args.checkpoint}.pth")
             hit, loss, reward, path_logs = process(is_train=0, args=args, model=model, optimizer=optimizer, dataset=test_set, kb_retriever=kb_retriever)
             with open(f"{ROOT_PATH}/ckpt/test/{args.checkpoint}.log", "w", encoding="utf-8") as f:
                 f.write("\n".join(path_logs))
             logger.info(f"Test result save at {ROOT_PATH}/ckpt/test/{args.checkpoint}.logs")
-            kb_retriever.save_cache()
+            # kb_retriever.save_cache()
     logger.info("End")

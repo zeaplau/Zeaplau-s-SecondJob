@@ -1,7 +1,6 @@
 import os
 import torch
 import torch.nn as nn
-import pytorch_lightning as L
 import torch.nn.functional as F
 import numpy as np
 
@@ -77,9 +76,9 @@ class RefModel(nn.Module):
 
     def choose_topic_entity(self, topic_entities: List[str], question: str) -> Tuple[str, int]:
         topic_choices = list(map(lambda x: self.choice_template.format(x), topic_entities))
-        topic_choices = self.choice_tokenizer([self.choice_template] * len(topic_choices), topic_choices, return_tensors='pt', padding=True)
+        topic_choices = self.choice_tokenizer([self.choice_template] * len(topic_choices), topic_choices, return_tensors='pt', padding=True).to(self.device)
 
-        labels = torch.tensor(0).unsqueeze(0)
+        labels = torch.tensor(0).unsqueeze(0).to(self.device)
         outputs = self.choice_model(
             **{k: v.unsqueeze(0) for k, v in topic_choices.items()}, labels=labels
         )
@@ -92,7 +91,7 @@ class RefModel(nn.Module):
         input_seqs = list(map(lambda x: topic_entity + ", " + x, questions))
         
         # Rephrase the question without explicity mentioned topic entity
-        seqs_ = self.rewrite_tokenizer(input_seqs, padding=True, truncation=True, return_tensors='pt')
+        seqs_ = self.rewrite_tokenizer(input_seqs, padding=True, truncation=True, return_tensors='pt').to(self.device)
         generate_ids = self.rewrite_model.generate(seqs_['input_ids'], max_length=30)
         generate_sentences = self.rewrite_tokenizer.batch_decode(generate_ids, skip_special_tokens=True)
 
@@ -135,7 +134,9 @@ class RefModel(nn.Module):
         return out, dot
 
 
-    def get_loss(self, raw_logits: torch.Tensor, gold_score: np.ndarray, q_vecs: torch.Tensor, ga_vecs: torch.Tensor, nega_vecs: torch.Tensor, alpha: int = 0) -> torch.Tensor:
+    def get_loss(self, is_const, raw_logits: torch.Tensor, gold_score: np.ndarray, q_vecs: torch.Tensor, ga_vecs: torch.Tensor, nega_vecs: torch.Tensor, alpha: int = 0) -> torch.Tensor:
+        if is_const is not None:
+            return 0.
         logits = F.softmax(raw_logits, dim=1)
 
         # use for debug
@@ -144,7 +145,7 @@ class RefModel(nn.Module):
             exit()
 
         if isinstance(gold_score, np.ndarray):
-            gold_score = torch.tensor(gold_score, dtype=torch.float)
+            gold_score = torch.tensor(gold_score, dtype=torch.float).repeat(logits.size()[0], 1).to(self.device)
 
         # KL_loss
         kl_loss = self.kl_loss.forward(logits.log(), gold_score)
@@ -152,7 +153,8 @@ class RefModel(nn.Module):
         # NTXent Loss
         ntx_loss = self.ntxent.forward(question_vec=q_vecs, positive_sample=ga_vecs, negative_sample=nega_vecs)
 
-        return alpha * kl_loss + (1 - alpha) * ntx_loss
+        # the kl_loss need to recover from mean for num of questions and ref
+        return alpha * kl_loss * logits.size()[1] + (1 - alpha) * ntx_loss
 
 
     def debug(self, qs_ids, cps, ga_ids):
@@ -230,10 +232,10 @@ class RefModel(nn.Module):
         nega_idx = torch.sum(1 - torch.eq(negative_ids, 0).type(torch.LongTensor), 1).squeeze(0) - 1
 
         # embedding
-        q_embeddings = self.embedder(qs_ids) # [q_nums, q_len, hidden_size]
-        ans_embeddings = self.embedder(cps_ids) # [cps_nums, cp_len, hidden_size]
-        ga_embeddings = self.embedder(ga_ids) # [gold_ans_nums, ga_len, hidden_size]
-        nega_embeddings = self.embedder(negative_ids)
+        q_embeddings = self.embedder(qs_ids.to(self.device)) # [q_nums, q_len, hidden_size]
+        ans_embeddings = self.embedder(cps_ids.to(self.device)) # [cps_nums, cp_len, hidden_size]
+        ga_embeddings = self.embedder(ga_ids.to(self.device)) # [gold_ans_nums, ga_len, hidden_size]
+        nega_embeddings = self.embedder(negative_ids.to(self.device))
 
         # encoding
         q_encs, _ = self.q_encoder(q_embeddings) # [q_nums, q_len, hidden_size]
@@ -260,4 +262,3 @@ class RefModel(nn.Module):
         # q_vecs = torch.mean(q_vecs, dim=0)
         dot_sim = torch.mm(q_vecs.squeeze(0), ans_vecs.transpose(0, 1))
         return dot_sim, q_vecs, ans_vecs, ga_vecs, nega_vecs
-
