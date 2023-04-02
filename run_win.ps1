@@ -12,11 +12,11 @@ python .\main.py `
 --learning_rate 1e-5 `
 --vocab_txt .\config\vocab.txt `
 --config .\config\config_SimpleRanker.json `
---alpha 0.1 `
+--alpha 0.2 `
 --batch_size 1 `
 --seed 123 `
 --gpu_id 0 `
 --optimizer AdamW `
 --checkpoint test `
 --cache_dir .\ConvRef\cache\ `
---model_path test `
+--eval_model test `

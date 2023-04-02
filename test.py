@@ -1,7 +1,7 @@
 import torch
 
 from model.load_convref import ConvRefDataset, ConvRefInstance
-from model.lstm_ref import RefModel
+from model.ref import RefModel
 from tools.tokenization import BasicTokenizer
 from tools.create_config import ModelConfig
 

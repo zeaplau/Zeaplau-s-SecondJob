@@ -3,7 +3,7 @@ import torch
 import argparse
 import torch.nn as nn
 
-from model.lstm_ref import RefModel
+from model.ref import RefModel
 from tools.create_config import ModelConfig
 from tools.tokenization import BasicTokenizer
 

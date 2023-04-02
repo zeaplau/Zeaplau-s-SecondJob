@@ -1,5 +1,6 @@
 import re
 import copy
+import json
 import numpy as np
 
 from datetime import datetime
@@ -13,7 +14,6 @@ import pdb
 const_minimax_dic = 'amount|number|how many|final|first|last|predominant|biggest|major|warmest|tallest|current|largest|most|newly|son|daughter'
 const_interaction_dic = '(and|or)'
 const_verification_dic = '(do|is|does|are|did|was|were)'
-
 
 def clean_answer(raw_answer, do_month =False):
     a = list(raw_answer)[0]
@@ -173,22 +173,22 @@ def retrieve_via_frontier(frontier, topic_entity, raw_candidate_paths, kb_retrie
     return raw_candidate_paths
 
 
-def retrieve_ConvRef_KB(instance, kb_retriever: sparql_test, tokenizer: BasicTokenizer, time, is_train, not_update, oracle=0):
+def retrieve_ConvRef_KB(instance, kb_retriever: sparql_test, tokenizer: BasicTokenizer, time, is_train, not_update, oracle=0, q_tag: str="uncertain"):
     raw_candidate_paths, paths, instance.orig_F1s, topic_entities = [], {}, [], []
 
     # Retrieve the candidate answer paths
     if time == 0:
+        # for ner in instance.questions[time]['NER']:
+        #     ner_id = kb_retriever.wikidata_label_to_id(ner)
+        #     if ner_id not in instance.historical_frontier and re.search("Q\d+", ner_id):
+        #         instance.historical_frontier.append(ner_id)
         topic_entity = [instance.seed_entity]
         raw_candidate_paths = retrieve_via_frontier(frontier=topic_entity, topic_entity=topic_entity, raw_candidate_paths=raw_candidate_paths, kb_retriever=kb_retriever, question=instance.questions[time]['question'])
         instance.current_frontier = topic_entity
         instance.current_topics = topic_entity
 
-        instance.historical_frontier = [instance.seed_entity]
-        for ner in instance.questions[time]['NER']:
-            ner_id = kb_retriever.wikidata_label_to_id(ner)
-            if ner_id not in instance.historical_frontier and re.search("Q\d+", ner_id):
-                instance.historical_frontier.append(ner_id)
-        instance.historical_frontier_text = list(set(instance.questions[time]['NER'] + [instance.seed_entity_text]))
+        instance.historical_frontier = topic_entity
+        instance.historical_frontier_text = list(set([instance.seed_entity_text]))
     else:
         prev_const = re.search("^%s" % const_verification_dic, instance.questions[time - 1]['question'].lower())
         topic_entity: str = instance.questions[time]['NER'] # topic entity in ner result
@@ -235,7 +235,7 @@ def retrieve_ConvRef_KB(instance, kb_retriever: sparql_test, tokenizer: BasicTok
         raw_candidate_paths = retrieve_via_frontier(frontier, topic_entity, raw_candidate_paths, kb_retriever, instance.questions[time]['question'], not_update=not_update)
 
     # print("historical_frontier: {}".format(instance.historical_frontier))
-    candidate_paths, hop_numbers = [], []
+    candidate_paths, filtered_cps_idx, hop_numbers, ts, p_entities = [], [], [], [], []
     max_cp_length, path2ans = 0, {}
     limit_number = 1000
     const_ans = 0
@@ -245,6 +245,7 @@ def retrieve_ConvRef_KB(instance, kb_retriever: sparql_test, tokenizer: BasicTok
         for p_idx, p in enumerate(statements):
             if len(statements[p]) > 3:
                 continue
+            ts += [s_idx]
             path2ans[sum(p, ())] = (statements[p], 0)
             filter_statements[p] = statements[p]
         instance.statements += [filter_statements]
@@ -257,8 +258,9 @@ def retrieve_ConvRef_KB(instance, kb_retriever: sparql_test, tokenizer: BasicTok
     # if re.search("^%s" % const_verification_dic, instance.questions[time]['question'].lower()):
     #     gold_ans = [w for w in instance.questions[time]['relation']] if instance.questions[time]['relation'] != "" else instance.current_topics
     #     psesudo_ans = [w.lower() for w in instance.questions[time]['gold_answer_text']]
-    
+
     for p_idx, p in enumerate(sorted_path):
+        # TODO filter paths according to the question type
         pred_ans, _ = clean_answer(path2ans[p][0], do_month=do_month)
         if re.search("^%s" % const_verification_dic, instance.questions[time]['question'].lower()) and is_train:
             measure_F1 = generate_Inclusion(gold_ans, set(p))
@@ -271,9 +273,18 @@ def retrieve_ConvRef_KB(instance, kb_retriever: sparql_test, tokenizer: BasicTok
             measure_F1 = generate_F1(pred_ans, gold_ans)
         
         p_txt = [kb_retriever.wikidata_id_to_label(w) for w in p if not re.search("^\?", w)]
-        p_txt += list(
-            map(lambda x: kb_retriever.wikidata_id_to_label(x) if re.search("Q\d+", x) else x, pred_ans)
-        )
+        # p_txt += list(
+        #     map(lambda x: kb_retriever.wikidata_id_to_label(x) if re.search("Q\d+", x) else x, pred_ans)
+        # )
+        p_entities += list(map(lambda x: kb_retriever.wikidata_id_to_label(x) if re.search("Q\d+", x) else x, pred_ans))
+
+        if q_tag == "time":
+            # if predict entity is time
+            try:
+                if datetime.strptime(list(path2ans[p][0])[0], "%Y-%m-%dT%H:%M:%SZ") is not None:
+                    filtered_cps_idx.append(p_idx)
+            except:
+                ...
 
         if (not is_train) or (np.random.rand() < (limit_number * 1. / len(path2ans))) or measure_F1 > 0.5:
             if None in p_txt:
@@ -306,6 +317,14 @@ def retrieve_ConvRef_KB(instance, kb_retriever: sparql_test, tokenizer: BasicTok
     instance.current_F1s = np.array(instance.current_F1s)
     const_ans = None
 
+    if len(filtered_cps_idx) != 0:
+        candidate_paths = [candidate_paths[i] for i in filtered_cps_idx]
+        instance.candidate_paths = [instance.candidate_paths[i] for i in filtered_cps_idx]
+        instance.orig_candidate_paths = [instance.orig_candidate_paths[i] for i in filtered_cps_idx]
+        instance.orig_F1s= [instance.orig_F1s[i] for i in filtered_cps_idx]
+        instance.F1s = instance.F1s[filtered_cps_idx]
+        instance.current_F1s = instance.current_F1s[filtered_cps_idx]
+
     if re.search("^%s" % const_verification_dic, instance.questions[time]['question'].lower()):
         if np.sum(instance.F1s) > 0.:
             const_ans = instance.questions[time]['gold_answer']
@@ -317,4 +336,4 @@ def retrieve_ConvRef_KB(instance, kb_retriever: sparql_test, tokenizer: BasicTok
     if np.sum(instance.F1s) == 0:
         instance.F1s = 1.
 
-    return candidate_paths, const_ans
+    return candidate_paths, const_ans, ts

@@ -14,8 +14,9 @@
 "method": "SimpleRanker",
 "use_bert": 0,
 "use_te_graph": 0,
-"use_match": 0,
+"mix": 1,
 "type_vocab_size": 3,
 "BART": "config/PLM/BART/",
-"BERT": "config/PLM/BERT/"
+"BERT": "config/PLM/BERT/",
+"ALBERT": "config/PLM/ALBERT"
 }
